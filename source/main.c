@@ -292,33 +292,67 @@ static void inspect_descriptors(int dev) {
         have_config_desc=1;
         config_value=(int)cd->bConfigurationValue;
     }
-    usbInterfaceDescriptor *id=(usbInterfaceDescriptor*)usbScanStaticDescriptor(dev,NULL,USB_DESCRIPTOR_TYPE_INTERFACE);
-    if(id) {
-        interface_no=id->bInterfaceNumber;
-        snprintf(s,sizeof(s),",\"number\":%u,\"class\":%u,\"subclass\":%u,\"protocol\":%u,\"endpoints\":%u",
-                (unsigned)id->bInterfaceNumber,(unsigned)id->bInterfaceClass,(unsigned)id->bInterfaceSubClass,
-                (unsigned)id->bInterfaceProtocol,(unsigned)id->bNumEndpoints);
-        emit("interface_descriptor",s);
-        have_interface_desc=1;
-    }
-    usbEndpointDescriptor *ep=(usbEndpointDescriptor*)usbScanStaticDescriptor(dev,NULL,USB_DESCRIPTOR_TYPE_ENDPOINT);
-    if(ep) {
-        snprintf(s,sizeof(s),",\"address\":%u,\"attributes\":%u,\"max_packet\":%u,\"interval\":%u",
-                (unsigned)ep->bEndpointAddress,(unsigned)ep->bmAttributes,
-                (unsigned)ep->wMaxPacketSize,(unsigned)ep->bInterval);
-        emit("endpoint_descriptor",s);
-        if((ep->bEndpointAddress&0x80) && ((ep->bmAttributes&3)==USB_ENDPOINT_TRANSFER_TYPE_INTERRUPT)) {
-            in_size=ep->wMaxPacketSize;
-            if(in_size>255 && ((in_size&0xff)==0)) {
-                /* Reverse the likely big-endian reinterpretation of wire-LE. */
-                in_size=(int)((unsigned)in_size>>8);
+    /* Walk every interface/endpoint, like the hardware-tested PS3 Riffmaster
+       plugin. The first USB endpoint may be OUT; do not assume it is IN. */
+    {
+        usbInterfaceDescriptor *ifd=NULL;
+        int iface_idx=0;
+        for(iface_idx=0;iface_idx<12;iface_idx++) {
+            ifd=(usbInterfaceDescriptor*)usbScanStaticDescriptor(
+                dev,ifd,USB_DESCRIPTOR_TYPE_INTERFACE);
+            if(!ifd)break;
+            have_interface_desc=1;
+            snprintf(s,sizeof(s),
+                 ",\"number\":%u,\"class\":%u,\"subclass\":%u,\"protocol\":%u,\"endpoints\":%u",
+                 (unsigned)ifd->bInterfaceNumber,(unsigned)ifd->bInterfaceClass,
+                 (unsigned)ifd->bInterfaceSubClass,(unsigned)ifd->bInterfaceProtocol,
+                 (unsigned)ifd->bNumEndpoints);
+            emit("interface_descriptor",s);
+            {
+                void *ptr=ifd;
+                int ep_idx;
+                for(ep_idx=0;ep_idx<ifd->bNumEndpoints && ep_idx<16;ep_idx++) {
+                    usbEndpointDescriptor *ep=(usbEndpointDescriptor*)
+                        usbScanStaticDescriptor(dev,ptr,USB_DESCRIPTOR_TYPE_ENDPOINT);
+                    if(!ep)break;
+                    ptr=ep;
+                    snprintf(s,sizeof(s),
+                         ",\"interface\":%u,\"address\":%u,\"attributes\":%u,\"max_packet_raw\":%u,\"interval\":%u",
+                         (unsigned)ifd->bInterfaceNumber,
+                         (unsigned)ep->bEndpointAddress,(unsigned)ep->bmAttributes,
+                         (unsigned)ep->wMaxPacketSize,(unsigned)ep->bInterval);
+                    emit("endpoint_descriptor",s);
+                    if(!candidate_ep && (ep->bEndpointAddress&0x80) &&
+                       ((ep->bmAttributes&3)==USB_ENDPOINT_TRANSFER_TYPE_INTERRUPT)) {
+                        candidate_ep=ep;
+                        have_interrupt_ep=1;
+                        interface_no=ifd->bInterfaceNumber;
+                        in_size=ep->wMaxPacketSize;
+                        if(in_size>255 && ((in_size&0xff)==0))
+                            in_size>>=8;
+                        if(in_size<1 || in_size>USB_PACKET) in_size=USB_PACKET;
+                        snprintf(s,sizeof(s),
+                          ",\"interface\":%d,\"packet_size\":%d",interface_no,in_size);
+                        emit("selected_interrupt_endpoint",s);
+                    }
+                }
             }
-            if(in_size<1||in_size>USB_PACKET) in_size=USB_PACKET;
-            candidate_ep=ep;
-            have_interrupt_ep=1;
-            emit("interrupt_endpoint_candidate",NULL);
         }
-    } else emit("endpoint_descriptor_missing",NULL);
+        if(!candidate_ep)emit("no_interrupt_in_endpoint",NULL);
+    }
+    {
+        unsigned char *hid=(unsigned char*)usbScanStaticDescriptor(
+            dev,NULL,USB_DESCRIPTOR_TYPE_HID);
+        if(hid) {
+            unsigned n=hid[0],i;
+            char hex[80];
+            if(n>32)n=32;
+            for(i=0;i<n;i++)snprintf(hex+2*i,sizeof(hex)-2*i,"%02x",hid[i]);
+            hex[2*n]='\0';
+            snprintf(s,sizeof(s),",\"hex\":\"%s\",\"length\":%u",hex,n);
+            emit("hid_descriptor",s);
+        } else emit("hid_descriptor_not_available",NULL);
+    }
     u8 speed=255;
     emit_rc("get_speed",usbGetDeviceSpeed(dev,&speed));
     snprintf(s,sizeof(s),",\"speed\":%u",(unsigned)speed);
