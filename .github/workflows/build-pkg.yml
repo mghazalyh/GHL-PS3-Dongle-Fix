@@ -1,4 +1,4 @@
-name: Build PS3 GHL v0.6 comprehensive diagnostic PKG
+name: Build PS3 GHL v0.7 EBOOT preflight PKG
 on:
   push:
     branches: [main]
@@ -20,6 +20,12 @@ jobs:
       - name: Test telemetry analyzer (synthetic, non-hardware)
         shell: bash
         run: python3 -m unittest discover -s tests -v
+      - name: Test preflight classification (host, synthetic)
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcc -std=c11 -O2 -Wall -Wextra -Werror -pedantic source/preflight.c tests/test_preflight.c -o /tmp/preflight-test
+          /tmp/preflight-test
       - name: Fetch pinned PS3DEV Linux SDK
         shell: bash
         run: |
@@ -42,11 +48,11 @@ jobs:
           pkg --list ghl_ps4_probe.pkg | tee package-structure.txt
           grep -q 'USRDIR/EBOOT.BIN' package-structure.txt
           grep -q 'PARAM.SFO' package-structure.txt
-          printf 'GHL PS4 receiver v0.6-onepass\nGit commit: %s\nUSB dongle target 1430:07BB\nNot hardware-tested\n' "$GITHUB_SHA" > BUILD_INFO.txt
+          printf 'GHL PS4 receiver v0.7-preflight\nGit commit: %s\nUSB dongle target 1430:07BB\nNot hardware-tested\n' "$GITHUB_SHA" > BUILD_INFO.txt
           sha256sum ghl_ps4_probe.pkg > SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: GHL-PS3-OnePass-v0.6-PKG
+          name: GHL-PS3-EBOOT-Preflight-v0.7-PKG
           path: |
             ghl_ps4_probe.pkg
             SHA256SUMS.txt
