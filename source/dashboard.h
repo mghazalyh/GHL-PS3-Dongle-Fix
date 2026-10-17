@@ -2,7 +2,8 @@
 #define GHL_LIVE_DASHBOARD_H
 typedef struct {
     int receiver;           /* Device attach callback received */
-    int usb_ready;          /* Descriptor and both required pipes present */
+    int usb_ready;
+    int configuration_ok;          /* Descriptor and both required pipes present */
     int init_sent;          /* At least one SET_REPORT submitted */
     int init_ok;            /* SET_REPORT completion callback was success */
     int init_error;
