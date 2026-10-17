@@ -114,32 +114,36 @@ void ghl_ui_draw(const GhlDashboardState *s) {
     text_at(75,35,WHITE,"GHL PS4 DONGLE DIAGNOSTIC  v0.5 LIVE");
     text_at(75,67,MUTED,"EXPERIMENTAL - USB evidence, not proof of guitar pairing");
 
-    card(55,103,1170,204);
-    status(129,"USB RECEIVER",
+    card(55,95,1170,235);
+    status(119,"USB RECEIVER",
         s->receiver?"DETECTED | VID 1430 PID 07BB":
                     "WAITING | PLUG IN PS4 RECEIVER",
         s->receiver?2:1);
-    status(171,"USB INTERFACE",
+    status(161,"USB CONFIG",
+        s->configuration_ok?"SET_CONFIGURATION CALLBACK OK":
+        s->receiver?"PENDING / SEE ERROR":"NOT AVAILABLE",
+        s->configuration_ok?2:1);
+    status(203,"USB INTERFACE",
         s->usb_ready?"DESCRIPTORS + PIPES READY":
        s->receiver?"OPENING / CHECKING ENDPOINTS":"NOT AVAILABLE",
         s->usb_ready?2:1);
-    status(213,"PS4 INIT (0x30)",
+    status(245,"PS4 INIT (0x30)",
         s->init_ok?"SET_REPORT ACKNOWLEDGED":
         s->init_error?"SET_REPORT ERROR":
         s->init_sent?"SENT - AWAITING CALLBACK":"NOT SENT",
         s->init_ok?2:(s->init_error?3:1));
-    status(255,"GUITAR INPUT",
+    status(287,"GUITAR INPUT",
         s->input_reports>0 ?
           (s->input_changes>0?"REPORTS + CHANGES OBSERVED":"REPORTS ARRIVING - NO CHANGE YET"):
           "NO REPORTS YET | PAIRING UNKNOWN",
         s->input_changes>0?2:1);
 
-    card(55,326,1170,102);
-    snprintf(line,sizeof(line),"REPORTS  %d",s->input_reports);text_at(90,356,WHITE,line);
-    snprintf(line,sizeof(line),"CHANGES  %d",s->input_changes);text_at(455,356,WHITE,line);
-    snprintf(line,sizeof(line),"ERRORS  %d",s->total_errors);text_at(833,356,s->total_errors?RED:GREEN,line);
+    card(55,343,1170,95);
+    snprintf(line,sizeof(line),"REPORTS  %d",s->input_reports);text_at(90,366,WHITE,line);
+    snprintf(line,sizeof(line),"CHANGES  %d",s->input_changes);text_at(455,366,WHITE,line);
+    snprintf(line,sizeof(line),"ERRORS  %d",s->total_errors);text_at(833,366,s->total_errors?RED:GREEN,line);
     snprintf(line,sizeof(line),"DROPPED EVENTS  %d",s->dropped_events);
-    text_at(833,393,MUTED,line);
+    text_at(833,406,MUTED,line);
 
     card(55,449,1170,169);
     if(s->finished) {
