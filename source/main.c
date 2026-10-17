@@ -19,6 +19,7 @@
 #include <usb/usb.h>
 #include <io/pad.h>
 #include "dashboard.h"
+#include "http_export.h"
 
 #define GHL_VID 0x1430
 #define GHL_PID 0x07bb
@@ -49,7 +50,9 @@ static unsigned long long test_started_ms, next_in_retry_ms;
 static int have_device_desc, have_config_desc, have_interface_desc, have_interrupt_ep;
 static unsigned char previous_report[USB_PACKET];
 static int previous_length = -1;
+static unsigned long long last_input_submit_ms,last_control_submit_ms;
 static GhlDashboardState ui;
+static int http_active;
 static volatile int completed;
 static int sysutil_exit_requested;
 static const char *log_path = "/dev_hdd0/tmp/GHLPROBE/telemetry.jsonl";
@@ -291,6 +294,7 @@ static void send_keepalive(void) {
     out_req.wIndex=(u16)interface_no;
     out_req.wLength=9;
     out_flight=1;
+    last_control_submit_ms=milliseconds();
     int rc=usbControlTransfer(ctrl_pipe,&out_req,out_data,on_control,NULL);
     emit_rc("set_report_submit",rc);
     if(rc==0)ui.init_sent=1;
@@ -299,6 +303,7 @@ static void send_keepalive(void) {
 static void listen_once(void) {
     if(int_pipe<0 || in_flight || milliseconds()<next_in_retry_ms) return;
     in_flight=1;
+    last_input_submit_ms=milliseconds();
     int rc=usbInterruptTransfer(int_pipe,in_data,in_size,on_interrupt,NULL);
     if(rc) {
         in_flight=0;usb_errors++;
@@ -355,6 +360,16 @@ int main(int argc,char **argv) {
         last_error("RSX initialization unavailable",-1);
     }
 
+    /* Read-only HTTP export runs independently from USB/UI. LAN only. */
+    rc=ghl_http_start(log_path,sum_path,ui.network_ip,sizeof(ui.network_ip));
+    http_active=(rc==0);
+    ui.network_ready=http_active;
+    if(http_active)emit("lan_export_started",",\"port\":8895");
+    else {
+        emit_rc("lan_export_failed",rc);
+        /* Network is OPTIONAL; do not mark USB functionality as failing. */
+    }
+
     rc=sysModuleLoad(SYSMODULE_USB);
     emit_rc("load_usb_module",rc);
     if(rc!=0 && rc!=SYSMODULE_ERR_DUPLICATE)last_error("load USB module",rc);
@@ -406,6 +421,22 @@ int main(int argc,char **argv) {
                 ui.receiver=ui.usb_ready=ui.init_ok=ui.init_sent=0;
                 ui.stage=-1;
             }
+        }
+        /* Timeouts are evidence about stalled callbacks; do not reuse
+         * buffers or close active pipes until the driver releases them. */
+        if(in_flight && now-last_input_submit_ms>3500ULL && !ui.input_timeout_warned) {
+            ui.input_timeout_warned=1;
+            ui.total_errors++;
+            ui.last_error=-9001;
+            snprintf(ui.last_operation,sizeof(ui.last_operation),"USB interrupt callback stalled");
+            emit("interrupt_callback_stalled",",\"threshold_ms\":3500");
+        }
+        if(out_flight && now-last_control_submit_ms>3500ULL && !ui.control_timeout_warned) {
+            ui.control_timeout_warned=1;
+            ui.total_errors++;
+            ui.last_error=-9002;
+            snprintf(ui.last_operation,sizeof(ui.last_operation),"USB control callback stalled");
+            emit("control_callback_stalled",",\"threshold_ms\":3500");
         }
         if(!completed && attached_dev>=0 && !detached) {
             if(now-last_keepalive_ms>=7000 && !out_flight) {
@@ -507,6 +538,7 @@ int main(int argc,char **argv) {
         if(summary){fprintf(summary,"Interrupted by PS3 system exit. Reports: %u Errors: %u\n",
                             report_count,usb_errors);fclose(summary);}
     }
+    if(http_active)ghl_http_stop();
     if(graphics_ok)ghl_ui_shutdown();
     else msgDialogAbort();
     if(registered)usbUnregisterExtraLdd(&ldd);
