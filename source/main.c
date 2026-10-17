@@ -38,10 +38,13 @@ static sys_mutex_t q_mutex;
 static volatile int mutex_ok, device_id = -1, detached, in_flight, out_flight;
 static int ctrl_pipe = -1, int_pipe = -1, interface_no = 0;
 static int in_size = USB_PACKET;
-static unsigned char in_data[USB_PACKET] __attribute__((aligned(16)));
-static unsigned char out_data[16] __attribute__((aligned(16))) =
-    {0x30,0x02,0x08,0x0a,0,0,0,0,0};
-static usbDeviceRequest out_req;
+/* DMA-safe buffers: successful PS3 guitar projects call usbAllocateMemory. */
+static unsigned char *in_data, *out_data;
+static usbDeviceRequest out_req,cfg_req;
+static int cfg_in_flight, cfg_ok, cfg_sent;
+static int config_value=1, config_error;
+static usbEndpointDescriptor *candidate_ep;
+static int dma_buffers_ok;
 static FILE *logfile;
 static unsigned report_count, usb_errors, attach_count, control_count, detach_count;
 static unsigned receiver_session_reports;
@@ -174,6 +177,11 @@ static void on_interrupt(s32 result, s32 count, void *arg) {
     if(result!=0) next_in_retry_ms=milliseconds()+450;
     in_flight=0;
 }
+static void on_configuration(s32 result, s32 count, void *arg) {
+    (void)arg;
+    enqueue('F',device_id,result,count,NULL);
+    cfg_in_flight=0;
+}
 static void on_control(s32 result, s32 count, void *arg) {
     (void)arg;
     enqueue('C',device_id,result,count,NULL);
@@ -231,7 +239,8 @@ static void pump_events(void) {
             }
         } else {
             const char *kind=e.kind=='A'?"attach":e.kind=='D'?"detach":
-                             e.kind=='C'?"set_report_complete":"probe";
+                             e.kind=='C'?"set_report_complete":
+                             e.kind=='F'?"set_configuration_complete":"probe";
             snprintf(extra,sizeof(extra),",\"device\":%d,\"rc\":%d,\"length\":%d",
                      e.device,e.result,e.count);
             emit(kind,extra);
@@ -241,6 +250,10 @@ static void pump_events(void) {
                 ui.init_ok=0;ui.init_sent=0;
                 receiver_session_reports=0;
                 test_started_ms=0;previous_length=-1;
+            }
+            if(e.kind=='F') {
+                if(e.result==0)cfg_ok=1;
+                else {config_error=e.result;cfg_ok=0;last_error("SET_CONFIGURATION completion",e.result);}
             }
             if(e.kind=='C') {
                 control_count++;
@@ -277,6 +290,7 @@ static void inspect_descriptors(int dev) {
                 (unsigned)cd->bNumInterfaces,(unsigned)cd->wTotalLength,(unsigned)cd->bConfigurationValue);
         emit("config_descriptor",s);
         have_config_desc=1;
+        config_value=(int)cd->bConfigurationValue;
     }
     usbInterfaceDescriptor *id=(usbInterfaceDescriptor*)usbScanStaticDescriptor(dev,NULL,USB_DESCRIPTOR_TYPE_INTERFACE);
     if(id) {
@@ -300,10 +314,9 @@ static void inspect_descriptors(int dev) {
                 in_size=(int)((unsigned)in_size>>8);
             }
             if(in_size<1||in_size>USB_PACKET) in_size=USB_PACKET;
-            int_pipe=usbOpenPipe(dev,ep);
-            emit_rc("open_interrupt_pipe",int_pipe);
-            have_interrupt_ep=(int_pipe>=0);
-            if(int_pipe<0)last_error("open interrupt endpoint",int_pipe);
+            candidate_ep=ep;
+            have_interrupt_ep=1;
+            emit("interrupt_endpoint_candidate",NULL);
         }
     } else emit("endpoint_descriptor_missing",NULL);
     u8 speed=255;
@@ -311,8 +324,25 @@ static void inspect_descriptors(int dev) {
     snprintf(s,sizeof(s),",\"speed\":%u",(unsigned)speed);
     emit("device_speed",s);
 }
+static void submit_configuration(void) {
+    if(ctrl_pipe<0 || cfg_sent || cfg_in_flight)return;
+    memset(&cfg_req,0,sizeof(cfg_req));
+    cfg_req.bmRequestType=0x00;
+    cfg_req.bRequest=USB_REQUEST_SET_CONFIGURATION;
+    cfg_req.wValue=(u16)config_value;
+    cfg_req.wIndex=0;
+    cfg_req.wLength=0;
+    cfg_in_flight=1;
+    cfg_sent=1;
+    int rc=usbControlTransfer(ctrl_pipe,&cfg_req,NULL,on_configuration,NULL);
+    emit_rc("set_configuration_submit",rc);
+    if(rc!=0) {
+        cfg_in_flight=0;config_error=rc;
+        last_error("SET_CONFIGURATION submit",rc);
+    }
+}
 static void send_keepalive(void) {
-    if(ctrl_pipe<0 || out_flight) return;
+    if(ctrl_pipe<0 || out_flight || !out_data || !cfg_ok) return;
     memset(&out_req,0,sizeof(out_req));
     out_req.bmRequestType=0x21;  /* host-to-device class interface */
     out_req.bRequest=0x09;      /* HID SET_REPORT */
@@ -327,7 +357,8 @@ static void send_keepalive(void) {
     else {out_flight=0; usb_errors++;ui.init_error=rc;last_error("HID SET_REPORT submission",rc);}
 }
 static void listen_once(void) {
-    if(int_pipe<0 || in_flight || milliseconds()<next_in_retry_ms) return;
+    if(int_pipe<0 || in_flight || !in_data || !cfg_ok ||
+       milliseconds()<next_in_retry_ms) return;
     in_flight=1;
     last_input_submit_ms=milliseconds();
     int rc=usbInterruptTransfer(int_pipe,in_data,in_size,on_interrupt,NULL);
@@ -406,7 +437,26 @@ int main(int argc,char **argv) {
     if(!usb_initialized) {
         ui.usb_start_error=rc;
         last_error("USB subsystem init",rc);
-    } else if(mutex_ok) {
+    }
+    if(usb_initialized) {
+        void *inmem=NULL,*outmem=NULL;
+        int rc_in=usbAllocateMemory(&inmem,USB_PACKET);
+        int rc_out=usbAllocateMemory(&outmem,USB_PACKET);
+        emit_rc("usbd_dma_alloc_input",rc_in);
+        emit_rc("usbd_dma_alloc_output",rc_out);
+        if(rc_in==0 && rc_out==0 && inmem && outmem) {
+            in_data=(unsigned char*)inmem;
+            out_data=(unsigned char*)outmem;
+            memset(in_data,0,USB_PACKET);
+            memset(out_data,0,USB_PACKET);
+            {const unsigned char magic[]={0x30,0x02,0x08,0x0a,0,0,0,0,0};
+             memcpy(out_data,magic,sizeof(magic));}
+            dma_buffers_ok=1;
+        } else {
+            last_error("USBD DMA allocation failed",rc_in?rc_in:(rc_out?rc_out:-1));
+        }
+    }
+    if(usb_initialized && dma_buffers_ok && mutex_ok) {
         rc=usbRegisterExtraLdd(&ldd,GHL_VID,GHL_PID);
         emit_rc("receiver_driver_register",rc);
         registered=(rc==USB_OK);
@@ -426,6 +476,8 @@ int main(int argc,char **argv) {
             ui.receiver=1;
             have_device_desc=have_config_desc=have_interface_desc=have_interrupt_ep=0;
             ui.usb_ready=0; ui.init_ok=0;ui.init_sent=0;ui.init_error=0;
+            cfg_ok=cfg_sent=cfg_in_flight=0;config_error=0;
+            candidate_ep=NULL;int_pipe=-1;
             previous_length=-1;
             receiver_session_reports=0;
             emit("receiver_detected",NULL);
@@ -433,9 +485,8 @@ int main(int argc,char **argv) {
             ctrl_pipe=usbOpenPipe(attached_dev,NULL);
             emit_rc("open_control_pipe",ctrl_pipe);
             if(ctrl_pipe<0)last_error("open USB control endpoint",ctrl_pipe);
-            ui.usb_ready=have_device_desc&&have_config_desc&&have_interface_desc&&
-                          have_interrupt_ep&&ctrl_pipe>=0;
-            if(ui.usb_ready)send_keepalive();
+            if(ctrl_pipe>=0 && have_config_desc && have_interrupt_ep)
+                submit_configuration();
             last_keepalive_ms=now;
         }
         if(detached) {
@@ -444,6 +495,7 @@ int main(int argc,char **argv) {
                 if(int_pipe>=0)usbClosePipe(int_pipe);
                 if(ctrl_pipe>=0)usbClosePipe(ctrl_pipe);
                 int_pipe=-1;ctrl_pipe=-1;attached_dev=-1;detached=0;
+                cfg_ok=cfg_sent=cfg_in_flight=0;candidate_ep=NULL;
                 test_started_ms=0;previous_length=-1;
                 ui.receiver=ui.usb_ready=ui.init_ok=ui.init_sent=0;
                 ui.stage=-1;
@@ -466,6 +518,15 @@ int main(int argc,char **argv) {
             emit("control_callback_stalled",",\"threshold_ms\":3500");
         }
         if(!completed && attached_dev>=0 && !detached) {
+            if(cfg_ok && int_pipe<0 && candidate_ep) {
+                int_pipe=usbOpenPipe(attached_dev,candidate_ep);
+                emit_rc("open_interrupt_pipe_after_configuration",int_pipe);
+                if(int_pipe<0)last_error("open interrupt endpoint",int_pipe);
+                candidate_ep=NULL;
+                ui.usb_ready=(int_pipe>=0 && ctrl_pipe>=0 && have_device_desc &&
+                    have_config_desc && have_interface_desc && have_interrupt_ep && cfg_ok);
+                if(ui.usb_ready)send_keepalive();
+            }
             if(now-last_keepalive_ms>=7000 && !out_flight) {
                 send_keepalive();last_keepalive_ms=now;
             }
@@ -497,7 +558,12 @@ int main(int argc,char **argv) {
                 if(!usb_initialized)snprintf(ui.reason,sizeof(ui.reason),"USB driver initialization failed. Read error below.");
                 else if(!registered)snprintf(ui.reason,sizeof(ui.reason),"Receiver driver registration failed.");
                 else if(!ui.receiver)snprintf(ui.reason,sizeof(ui.reason),"Plug in PS4 dongle (1430:07BB). Timer paused.");
-                else if(!ui.usb_ready)snprintf(ui.reason,sizeof(ui.reason),"USB descriptors/endpoint incomplete. Timer paused.");
+                else if(!cfg_ok && !config_error)
+                    snprintf(ui.reason,sizeof(ui.reason),"Waiting for USB SET_CONFIGURATION callback.");
+                else if(config_error)
+                    snprintf(ui.reason,sizeof(ui.reason),"USB SET_CONFIGURATION FAILED. Error shown below.");
+                else if(!ui.usb_ready)
+                    snprintf(ui.reason,sizeof(ui.reason),"USB descriptors or interrupt pipe unavailable.");
                 else if(!ui.init_ok)snprintf(ui.reason,sizeof(ui.reason),"Waiting for HID SET_REPORT success. Timer paused.");
                 else snprintf(ui.reason,sizeof(ui.reason),"Pair guitar, press frets: waiting for raw input reports.");
             }
@@ -586,7 +652,11 @@ int main(int argc,char **argv) {
     if(registered)usbUnregisterExtraLdd(&ldd);
     if(int_pipe>=0 && !in_flight)usbClosePipe(int_pipe);
     if(ctrl_pipe>=0 && !out_flight)usbClosePipe(ctrl_pipe);
-    if(usb_initialized)usbEnd();
+    if(usb_initialized) {
+        if(!in_flight && in_data)usbFreeMemory(in_data);
+        if(!out_flight && out_data)usbFreeMemory(out_data);
+        usbEnd();
+    }
     if(mutex_ok)sysMutexDestroy(q_mutex);
     if(logfile)fclose(logfile);
     if(pad_ready)ioPadEnd();
