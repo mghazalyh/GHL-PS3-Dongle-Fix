@@ -43,6 +43,7 @@ static unsigned char out_data[16] __attribute__((aligned(16))) =
 static usbDeviceRequest out_req;
 static FILE *logfile;
 static unsigned report_count, usb_errors, attach_count, control_count, detach_count;
+static unsigned receiver_session_reports;
 static unsigned long long started_ms;
 static unsigned long long test_started_ms, next_in_retry_ms;
 static int have_device_desc, have_config_desc, have_interface_desc, have_interrupt_ep;
@@ -188,6 +189,7 @@ static void pump_events(void) {
             emit("interrupt_in",extra);
             if(e.result==0 && e.count>0) {
                 report_count++;
+                receiver_session_reports++;
                 ui.input_reports=(int)report_count;
                 if(previous_length>=0 && (previous_length!=n || memcmp(previous_report,e.data,(size_t)n)!=0)) {
                     ui.input_changes++;
@@ -219,6 +221,7 @@ static void pump_events(void) {
             if(e.kind=='D') {
                 detach_count++;ui.receiver=0;ui.usb_ready=0;
                 ui.init_ok=0;ui.init_sent=0;
+                receiver_session_reports=0;
                 test_started_ms=0;previous_length=-1;
             }
             if(e.kind=='C') {
@@ -382,6 +385,7 @@ int main(int argc,char **argv) {
             have_device_desc=have_config_desc=have_interface_desc=have_interrupt_ep=0;
             ui.usb_ready=0; ui.init_ok=0;ui.init_sent=0;ui.init_error=0;
             previous_length=-1;
+            receiver_session_reports=0;
             emit("receiver_detected",NULL);
             inspect_descriptors(attached_dev);
             ctrl_pipe=usbOpenPipe(attached_dev,NULL);
@@ -412,7 +416,7 @@ int main(int argc,char **argv) {
         pump_events();
 
         if(!completed) {
-            if(ui.usb_ready && ui.init_ok && report_count>0) {
+            if(ui.usb_ready && ui.init_ok && receiver_session_reports>0) {
                 if(!test_started_ms) {
                     test_started_ms=milliseconds();
                     emit("guided_testing_started",NULL);
