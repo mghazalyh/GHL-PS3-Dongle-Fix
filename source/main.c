@@ -90,6 +90,7 @@ static int stage_for(unsigned long long tms) {
 static unsigned long long test_time_ms(void) {
     return test_started_ms ? milliseconds()-test_started_ms : 0;
 }
+static void emit(const char *event, const char *extra);
 static void last_error(const char *op,int rc) {
     if(rc==0) return;
     ui.total_errors++;
