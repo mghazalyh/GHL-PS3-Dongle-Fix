@@ -20,6 +20,7 @@
 #include <io/pad.h>
 #include "dashboard.h"
 #include "http_export.h"
+#include "preflight.h"
 
 #define GHL_VID 0x1430
 #define GHL_PID 0x07bb
@@ -45,6 +46,10 @@ static int cfg_in_flight, cfg_ok, cfg_sent;
 static int config_value=1, config_error;
 static usbEndpointDescriptor *candidate_ep;
 static int dma_buffers_ok;
+static GhlPreflight preflight;
+static int gh_game_shape, hid_shape_found, matching_in_count, matching_out_count;
+static int usb_matching_endpoint_count;
+static unsigned long long max_wait_ms=120000ULL;
 static FILE *logfile;
 static unsigned report_count, usb_errors, attach_count, control_count, detach_count;
 static unsigned receiver_session_reports;
@@ -204,6 +209,11 @@ static void pump_events(void) {
             if(e.result==0 && e.count>0) {
                 report_count++;
                 receiver_session_reports++;
+                ghl_preflight_feed(&preflight,e.data,(size_t)n,
+                    test_started_ms ? stage_for(test_time_ms()) : -1);
+                ui.guitar_connected=(preflight.connection_yes>0);
+                ui.compatible_reports=(int)preflight.usable_reports;
+                ui.passed_stages=(int)ghl_preflight_stages_passed(&preflight);
                 ui.input_reports=(int)report_count;
                 if(previous_length>=0 && (previous_length!=n || memcmp(previous_report,e.data,(size_t)n)!=0)) {
                     ui.input_changes++;
@@ -292,25 +302,29 @@ static void inspect_descriptors(int dev) {
         have_config_desc=1;
         config_value=(int)cd->bConfigurationValue;
     }
-    /* Walk every interface/endpoint, like the hardware-tested PS3 Riffmaster
-       plugin. The first USB endpoint may be OUT; do not assume it is IN. */
+    /* Two distinct checks: whether *we* can read IN reports and whether
+       the ORIGINAL GHL game's attach function would accept the descriptors.
+       EBOOT attach 0xC59698 scans one HID interface and requires two
+       interrupt endpoints (one IN and one OUT), protocol 0. */
     {
         usbInterfaceDescriptor *ifd=NULL;
-        int iface_idx=0;
+        int iface_idx;
         for(iface_idx=0;iface_idx<12;iface_idx++) {
+            usbEndpointDescriptor *in_ep=NULL;
+            int in_count=0,out_count=0,endpoint_count=0;
+            int ep_idx;
             ifd=(usbInterfaceDescriptor*)usbScanStaticDescriptor(
                 dev,ifd,USB_DESCRIPTOR_TYPE_INTERFACE);
             if(!ifd)break;
             have_interface_desc=1;
             snprintf(s,sizeof(s),
-                 ",\"number\":%u,\"class\":%u,\"subclass\":%u,\"protocol\":%u,\"endpoints\":%u",
+                 ",\"number\":%u,\"class\":%u,\"subclass\":%u,\"protocol\":%u,\"alt_setting\":%u,\"endpoints\":%u",
                  (unsigned)ifd->bInterfaceNumber,(unsigned)ifd->bInterfaceClass,
                  (unsigned)ifd->bInterfaceSubClass,(unsigned)ifd->bInterfaceProtocol,
-                 (unsigned)ifd->bNumEndpoints);
+                 (unsigned)ifd->bAlternateSetting,(unsigned)ifd->bNumEndpoints);
             emit("interface_descriptor",s);
             {
                 void *ptr=ifd;
-                int ep_idx;
                 for(ep_idx=0;ep_idx<ifd->bNumEndpoints && ep_idx<16;ep_idx++) {
                     usbEndpointDescriptor *ep=(usbEndpointDescriptor*)
                         usbScanStaticDescriptor(dev,ptr,USB_DESCRIPTOR_TYPE_ENDPOINT);
@@ -322,22 +336,50 @@ static void inspect_descriptors(int dev) {
                          (unsigned)ep->bEndpointAddress,(unsigned)ep->bmAttributes,
                          (unsigned)ep->wMaxPacketSize,(unsigned)ep->bInterval);
                     emit("endpoint_descriptor",s);
-                    if(!candidate_ep && (ep->bEndpointAddress&0x80) &&
-                       ((ep->bmAttributes&3)==USB_ENDPOINT_TRANSFER_TYPE_INTERRUPT)) {
-                        candidate_ep=ep;
-                        have_interrupt_ep=1;
-                        interface_no=ifd->bInterfaceNumber;
-                        in_size=ep->wMaxPacketSize;
-                        if(in_size>255 && ((in_size&0xff)==0))
-                            in_size>>=8;
-                        if(in_size<1 || in_size>USB_PACKET) in_size=USB_PACKET;
-                        snprintf(s,sizeof(s),
-                          ",\"interface\":%d,\"packet_size\":%d",interface_no,in_size);
-                        emit("selected_interrupt_endpoint",s);
+                    if((ep->bmAttributes & 3)==USB_ENDPOINT_TRANSFER_TYPE_INTERRUPT) {
+                        endpoint_count++;
+                        if(ep->bEndpointAddress & 0x80){in_count++;in_ep=ep;}
+                        else out_count++;
+                        if(!candidate_ep && (ep->bEndpointAddress & 0x80)) {
+                            /* Still capture input even if GAME descriptor check fails. */
+                            candidate_ep=ep;
+                            have_interrupt_ep=1;
+                            interface_no=ifd->bInterfaceNumber;
+                            in_size=ep->wMaxPacketSize;
+                            if(in_size>255 && ((in_size&0xff)==0)) in_size>>=8;
+                            if(in_size<1 || in_size>USB_PACKET) in_size=USB_PACKET;
+                        }
                     }
                 }
             }
+            if(ifd->bInterfaceClass==3 && ifd->bAlternateSetting==0 &&
+               ifd->bInterfaceProtocol==0 && (ifd->bInterfaceSubClass==0 ||
+               ifd->bInterfaceSubClass==1) && ifd->bNumEndpoints==2 &&
+               endpoint_count==2 && in_count==1 && out_count==1) {
+                hid_shape_found=1;
+                matching_in_count=in_count;
+                matching_out_count=out_count;
+                usb_matching_endpoint_count=endpoint_count;
+                if(in_ep) {
+                    candidate_ep=in_ep;
+                    interface_no=ifd->bInterfaceNumber;
+                    in_size=in_ep->wMaxPacketSize;
+                    if(in_size>255 && ((in_size&0xff)==0))in_size>>=8;
+                    if(in_size<1 || in_size>USB_PACKET)in_size=USB_PACKET;
+                }
+            }
+            snprintf(s,sizeof(s),
+                ",\"interface\":%u,\"game_hid_shape\":%s,\"interrupt_in\":%d,\"interrupt_out\":%d,\"endpoint_count\":%d",
+                (unsigned)ifd->bInterfaceNumber,
+                hid_shape_found?"true":"false",in_count,out_count,endpoint_count);
+            emit("game_hid_interface_shape",s);
         }
+        gh_game_shape=have_device_desc && have_config_desc &&
+                      cd && cd->bNumInterfaces==1 && hid_shape_found;
+        ui.game_shape_ok=gh_game_shape;
+        if(!gh_game_shape)
+            emit("game_descriptor_incompatibility",
+                ",\"note\":\"Original game attach may reject this USB layout\"");
         if(!candidate_ep)emit("no_interrupt_in_endpoint",NULL);
     }
     {
@@ -424,13 +466,14 @@ int main(int argc,char **argv) {
     unsigned long long last_keepalive_ms=0, last_draw_ms=0;
     FILE *summary;
 
+    ghl_preflight_reset(&preflight);
     started_ms=milliseconds();
     last_flush_ms=started_ms;
     memset(&ui,0,sizeof(ui));
     ui.stage=-1;
     prepare_log();
     snprintf(ui.log_path,sizeof(ui.log_path),"%s",log_path);
-    emit("start",",\"version\":\"v0.6-onepass\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
+    emit("start",",\"version\":\"v0.7-preflight\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
     sysMutexAttrInitialize(mattr);
     rc=sysMutexCreate(&q_mutex,&mattr);
     mutex_ok=(rc==0);
@@ -509,6 +552,10 @@ int main(int argc,char **argv) {
             attached_dev=device_id;
             ui.receiver=1;
             have_device_desc=have_config_desc=have_interface_desc=have_interrupt_ep=0;
+            hid_shape_found=gh_game_shape=matching_in_count=matching_out_count=0;
+            usb_matching_endpoint_count=0;ui.game_shape_ok=0;
+            ghl_preflight_reset(&preflight);
+            ui.passed_stages=ui.compatible_reports=ui.guitar_connected=0;
             ui.usb_ready=0; ui.init_ok=0;ui.init_sent=0;ui.init_error=0;
             cfg_ok=cfg_sent=cfg_in_flight=0;config_error=0;ui.configuration_ok=0;
             candidate_ep=NULL;int_pipe=-1;
@@ -531,7 +578,9 @@ int main(int argc,char **argv) {
                 int_pipe=-1;ctrl_pipe=-1;attached_dev=-1;detached=0;
                 cfg_ok=cfg_sent=cfg_in_flight=0;candidate_ep=NULL;ui.configuration_ok=0;
                 test_started_ms=0;previous_length=-1;
+                ghl_preflight_reset(&preflight);
                 ui.receiver=ui.usb_ready=ui.init_ok=ui.init_sent=0;
+                ui.game_shape_ok=ui.guitar_connected=0;
                 ui.stage=-1;
             }
         }
@@ -575,6 +624,10 @@ int main(int argc,char **argv) {
                     emit("guided_testing_started",NULL);
                 }
             }
+            if(!test_started_ms && t>max_wait_ms){
+                completed=1;ui.finished=1;
+                emit("preflight_wait_timeout",",\"timeout_ms\":120000");
+            }
             if(test_started_ms && now-test_started_ms>=180000ULL) {
                 completed=1;ui.finished=1;emit("guided_testing_finished",NULL);
             }
@@ -605,6 +658,11 @@ int main(int argc,char **argv) {
 
         ui.dropped_events=(int)dropped;
         ui.elapsed_seconds=(int)(t/1000ULL);
+        ui.passed_stages=(int)ghl_preflight_stages_passed(&preflight);
+        snprintf(ui.verdict,sizeof(ui.verdict),"%s",
+                 ghl_preflight_verdict(&preflight,
+                 ui.receiver && have_device_desc,gh_game_shape,
+                 ui.configuration_ok,ui.init_ok,(unsigned)ui.total_errors,completed));
 
         {
             int start_down=pad_ready && controller_start();
@@ -623,7 +681,22 @@ int main(int argc,char **argv) {
             emit("capture_complete",NULL);
             summary=fopen(sum_path,"wb");
             if(summary) {
-                fprintf(summary,"GHL PS4 dongle diagnostic v0.6-onepass\n");
+                fprintf(summary,"GHL PS4 dongle preflight v0.7 (not an in-game compatibility proof)\n");
+                fprintf(summary,"PREFLIGHT VERDICT: %s\n",ui.verdict);
+                fprintf(summary,"The verdict covers standalone USB access only; NOT EBOOT booting, game USB ownership or injected game hooks.\n");
+                fprintf(summary,"Game HID interface shape (from independently analyzed EBOOT): %d\n",gh_game_shape);
+                fprintf(summary,"Matching game USB interface: HID class 3, protocol 0, 2 interrupt endpoints (IN+OUT), one config interface\n");
+                fprintf(summary,"PS4 report IDs/lengths valid: %u / %u (invalid %u)\n",
+                        preflight.usable_reports,preflight.raw_reports,preflight.invalid_reports);
+                fprintf(summary,"PS4 guitar isConnected: 1 in %u frames, 0 in %u, unknown %u\n",
+                        preflight.connection_yes,preflight.connection_no,preflight.connection_unknown);
+                fprintf(summary,"Observed action stages: %u / 12 (target 7+, including both strum directions)\n",
+                        ghl_preflight_stages_passed(&preflight));
+                fprintf(summary,"Observed six fret mask: 0x%02X; strum direction mask: 0x%02X\n",
+                        preflight.fret_mask,preflight.strum_directions);
+                fprintf(summary,"Observed whammy-active frames: %u, tilt-active frames: %u\n",
+                        preflight.whammy_events,preflight.tilt_events);
+                fprintf(summary,"Raw input packet bytes min %u max %u\n",preflight.min_report_len,preflight.max_report_len);
                 fprintf(summary,"Target USB VID:PID 1430:07BB\n");
                 fprintf(summary,"Receiver detected: %d\nUSB interface ready: %d\n",ui.receiver,ui.usb_ready);
                 fprintf(summary,"HID SET_REPORT success callback observed: %d\n",ui.init_ok);
@@ -637,8 +710,9 @@ int main(int argc,char **argv) {
                 {
                     int st,b;
                     for(st=0;st<12;st++) {
-                        fprintf(summary,"%02d %-24s reports=%u changed=%u  hotspots=",
-                                st+1,stages[st],stage_report_count[st],stage_change_count[st]);
+                        fprintf(summary,"%02d %-24s reports=%u changed=%u action_edges=%u  hotspots=",
+                                st+1,stages[st],stage_report_count[st],stage_change_count[st],
+                                preflight.stage_actions[st]);
                         for(b=0;b<64;b++) if(stage_byte_flips[st][b]>0)
                             fprintf(summary," %d:%u",b,stage_byte_flips[st][b]);
                         fputc('\n',summary);
