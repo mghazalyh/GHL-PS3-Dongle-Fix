@@ -15,6 +15,12 @@ static void test_unpaired(){
     assert(strncmp(ghl_preflight_verdict(&p,1,1,1,1,0,1),"NO-GO",5)==0);
     d[25]=1;feed(0);
     assert(p.connection_yes==1);
+    assert(p.latest_connected==1);
+    d[25]=0;feed(0);
+    assert(p.latest_connected==0 && p.consecutive_connected==0);
+    assert(strncmp(ghl_preflight_verdict(&p,1,1,1,1,0,1),"NO-GO",5)==0);
+    d[25]=1;feed(0);feed(0);feed(0);
+    assert(p.consecutive_connected==3);
 }
 static void test_stages(){
     const int bit5[]={0x20,0x40,0x80,0x10,0,0};
