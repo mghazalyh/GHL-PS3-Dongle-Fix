@@ -129,7 +129,8 @@ void ghl_ui_draw(const GhlDashboardState *s) {
         s->receiver?"INCOMPATIBLE OR INCOMPLETE":"NOT AVAILABLE",
         s->game_shape_ok?2:(s->receiver?3:1));
     status(245,"PS4 INIT (0x30)",
-        s->init_ok?"SET_REPORT ACKNOWLEDGED":
+        s->keepalive_acks>=2?"TWO+ 0x30 CALLBACKS OK":
+        s->init_ok?"1ST ACK - WAIT 2ND":
         s->init_error?"SET_REPORT ERROR":
         s->init_sent?"SENT - AWAITING CALLBACK":"NOT SENT",
         s->init_ok?2:(s->init_error?3:1));
