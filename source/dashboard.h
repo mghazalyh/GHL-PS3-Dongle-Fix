@@ -1,6 +1,11 @@
 #ifndef GHL_LIVE_DASHBOARD_H
 #define GHL_LIVE_DASHBOARD_H
 typedef struct {
+    int game_shape_ok;
+    int guitar_connected;
+    int compatible_reports;
+    int passed_stages;
+    char verdict[80];
     int receiver;           /* Device attach callback received */
     int usb_ready;
     int configuration_ok;          /* Descriptor and both required pipes present */
