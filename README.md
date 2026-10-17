@@ -1,17 +1,47 @@
-# GHL PS4 dongle USB diagnostics on PS3 CFW
+# Guitar Hero Live PS4 receiver diagnostic for PS3 CFW
 
-**Experimental diagnostic; not a game compatibility patch. Not hardware-tested.**
+Version v0.5-live: RSX fullscreen status and raw USB telemetry. EXPERIMENTAL; NOT hardware-tested. This does not make the PS4 guitar work in-game.
 
-Collects USB descriptors, asynchronous HID SET_REPORT responses and raw interrupt input reports from the blue-sync PS4 Guitar Hero Live receiver (USB 1430:07bb). Pair guitar and manipulate six frets, strum, whammy and tilt over 180 seconds. Run this separately from Guitar Hero Live.
+## PS3 live display
 
-To build: install PS3DEV Linux SDK, then `make -f Makefile.ps3dev`. CI fetches a pinned public PS3DEV release and builds a fresh NPDRM .pkg; download from the Actions run artifact, after checking that the build succeeded.
+Updates approximately every 450 ms and shows:
+- USB RECEIVER DETECTED only after 1430:07BB extra-LDD attach callback.
+- USB INTERFACE READY only after descriptors, USB control pipe and interrupt-IN pipe are usable (not proof of SET_CONFIGURATION).
+- PS4 INIT ACKNOWLEDGED only after HID SET_REPORT output 30 02 08 0A 00 00 00 00 00 completes successfully (does not prove radio pairing).
+- GUITAR INPUT: successful nonempty USB interrupt reports. Distinguishes report count and raw report changes. Neither proves a paired guitar.
+- Live report bytes, total reports, changes, errors, last operation/error code, and next test prompt.
 
-Install resulting `ghl_ps4_probe.pkg` using the PS3 CFW Package Manager.
+The 180-second guided test does not start until a receiver is attached, required USB pipes exist, initialization completed without error, and at least one nonempty input report has arrived. When any prerequisite is missing, the clock is paused and a reason is displayed. If RSX graphics initialization fails, the app attempts a simpler live PS3 system dialog as fallback.
 
-Log files:
-- `/dev_hdd0/tmp/GHLPROBE/telemetry.jsonl`
-- `/dev_hdd0/tmp/GHLPROBE/summary.txt`
+## Install and run
 
-Fallback: `/dev_hdd0/tmp/ghl_probe_telemetry.jsonl` and `/dev_hdd0/tmp/ghl_probe_summary.txt`.
+1. Under Actions, download the latest successful build artifact named GHL-PS3-Live-v0.5-PKG.
+2. Extract the artifact ZIP. Copy ghl_ps4_probe.pkg to a FAT32 USB drive.
+3. On PS3 CFW, open XMB > Package Manager > Install Package Files. Install and launch GHL PS4 USB Diagnostic.
+4. Plug the blue-button PS4 GHL USB receiver (VID 1430, PID 07BB) and pair the powered six-fret guitar.
+5. Follow the 12 stages of 15 seconds each: black frets 1-3 separately; white frets 1-3 separately; strum up; strum down; chords+strum; whammy; tilt; Hero Power/menu.
+6. Use START on a STANDARD PS3 controller to end early, and press START again after releasing the button to dismiss the final onscreen summary.
 
-The probe does not modify game files and cannot by itself confirm whether the game can accept the PS4 dongle. Source and resulting software are experimental; game and USB hardware compatibility remain to be determined.
+## Telemetry
+
+Main log: /dev_hdd0/tmp/GHLPROBE/telemetry.jsonl
+Main summary: /dev_hdd0/tmp/GHLPROBE/summary.txt
+Fallback: /dev_hdd0/tmp/ghl_probe_telemetry.jsonl and /dev_hdd0/tmp/ghl_probe_summary.txt
+
+Collect both original files using FTP or a file manager; report visible error codes and whether input changes correlate with physical fret presses. Files must never be mistaken for proof that the game accepts this dongle.
+
+## Build
+
+The public GitHub Actions workflow downloads a pinned PS3DEV Linux SDK, compiles PowerPC source with PSL1GHT, links RSX video, and creates and validates a PS3 NPDRM PKG. Every push to main triggers a clean rebuild and a fresh artifact. The GitHub free tier is sufficient.
+
+## Attribution and license
+
+The framebuffer helper source/rsxutil.c and source/rsxutil.h derive from ps3dev/PSL1GHT samples/graphics/videoTest, licensed GPL version 3. Public source: https://github.com/ps3dev/PSL1GHT
+Source font8x8_basic.h is from Daniel Hepper's public-domain font8x8 repository: https://github.com/dhepper/font8x8
+All original project application code is distributed under GPL-3.0-or-later, compatible with the renderer helper. Keep the original license notices.
+
+## Important unresolved questions
+
+Standalone PS3 apps have not been proven able to claim this HID device against system drivers. SET_REPORT acknowledgment is not equivalent to successful radio handshake. PS3 Guitar Hero Live's import/stub vs syscall behavior cannot be decided without inspecting its real EBOOT. The next step after the diagnostic is a hardware test and EBOOT import dump, not a guessed VID/PID patch.
+
+See docs/HARDWARE_VALIDATION.md for a staged fault-isolation plan.
