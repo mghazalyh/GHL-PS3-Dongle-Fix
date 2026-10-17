@@ -37,14 +37,14 @@ static Event events[QUEUE_SIZE];
 static unsigned q_head, q_tail, dropped;
 static sys_mutex_t q_mutex;
 static volatile int mutex_ok, device_id = -1, detached, in_flight, out_flight;
-static int ctrl_pipe = -1, int_pipe = -1, interface_no = 0;
+static int ctrl_pipe = -1, int_pipe = -1, out_pipe = -1, interface_no = 0;
 static int in_size = USB_PACKET;
 /* DMA-safe buffers: successful PS3 guitar projects call usbAllocateMemory. */
 static unsigned char *in_data, *out_data;
 static usbDeviceRequest out_req,cfg_req;
 static int cfg_in_flight, cfg_ok, cfg_sent;
 static int config_value=1, config_error;
-static usbEndpointDescriptor *candidate_ep;
+static usbEndpointDescriptor *candidate_ep,*candidate_out_ep;
 static int dma_buffers_ok;
 static GhlPreflight preflight;
 static int gh_game_shape, hid_shape_found, matching_in_count, matching_out_count;
@@ -53,6 +53,7 @@ static unsigned long long max_wait_ms=120000ULL;
 static FILE *logfile;
 static unsigned report_count, usb_errors, attach_count, control_count, detach_count;
 static unsigned receiver_session_reports;
+static unsigned keepalive_acks;
 static unsigned stage_report_count[12], stage_change_count[12];
 static unsigned stage_byte_flips[12][64];
 static unsigned long long last_flush_ms;
@@ -267,7 +268,7 @@ static void pump_events(void) {
             }
             if(e.kind=='C') {
                 control_count++;
-                if(e.result==0)ui.init_ok=1;
+                if(e.result==0){ui.init_ok=1;keepalive_acks++;ui.keepalive_acks=(int)keepalive_acks;}
                 else {
                     ui.init_error=e.result;ui.init_ok=0;
                     usb_errors++;last_error("HID SET_REPORT completion",e.result);
@@ -310,7 +311,7 @@ static void inspect_descriptors(int dev) {
         usbInterfaceDescriptor *ifd=NULL;
         int iface_idx;
         for(iface_idx=0;iface_idx<12;iface_idx++) {
-            usbEndpointDescriptor *in_ep=NULL;
+            usbEndpointDescriptor *in_ep=NULL,*out_ep=NULL;
             int in_count=0,out_count=0,endpoint_count=0;
             int ep_idx;
             ifd=(usbInterfaceDescriptor*)usbScanStaticDescriptor(
@@ -339,7 +340,7 @@ static void inspect_descriptors(int dev) {
                     if((ep->bmAttributes & 3)==USB_ENDPOINT_TRANSFER_TYPE_INTERRUPT) {
                         endpoint_count++;
                         if(ep->bEndpointAddress & 0x80){in_count++;in_ep=ep;}
-                        else out_count++;
+                        else {out_count++;out_ep=ep;}
                         if(!candidate_ep && (ep->bEndpointAddress & 0x80)) {
                             /* Still capture input even if GAME descriptor check fails. */
                             candidate_ep=ep;
@@ -359,6 +360,7 @@ static void inspect_descriptors(int dev) {
                 hid_shape_found=1;
                 matching_in_count=in_count;
                 matching_out_count=out_count;
+                candidate_out_ep=out_ep;
                 usb_matching_endpoint_count=endpoint_count;
                 if(in_ep) {
                     candidate_ep=in_ep;
@@ -558,7 +560,8 @@ int main(int argc,char **argv) {
             ui.passed_stages=ui.compatible_reports=ui.guitar_connected=0;
             ui.usb_ready=0; ui.init_ok=0;ui.init_sent=0;ui.init_error=0;
             cfg_ok=cfg_sent=cfg_in_flight=0;config_error=0;ui.configuration_ok=0;
-            candidate_ep=NULL;int_pipe=-1;
+            candidate_ep=NULL;candidate_out_ep=NULL;int_pipe=-1;out_pipe=-1;
+            keepalive_acks=0;ui.keepalive_acks=0;
             previous_length=-1;
             receiver_session_reports=0;
             emit("receiver_detected",NULL);
@@ -574,9 +577,11 @@ int main(int argc,char **argv) {
             pump_events();
             if(!in_flight && !out_flight) {
                 if(int_pipe>=0)usbClosePipe(int_pipe);
+                if(out_pipe>=0)usbClosePipe(out_pipe);
                 if(ctrl_pipe>=0)usbClosePipe(ctrl_pipe);
                 int_pipe=-1;ctrl_pipe=-1;attached_dev=-1;detached=0;
-                cfg_ok=cfg_sent=cfg_in_flight=0;candidate_ep=NULL;ui.configuration_ok=0;
+                cfg_ok=cfg_sent=cfg_in_flight=0;candidate_ep=candidate_out_ep=NULL;ui.configuration_ok=0;
+                keepalive_acks=0;ui.keepalive_acks=0;
                 test_started_ms=0;previous_length=-1;
                 ghl_preflight_reset(&preflight);
                 ui.receiver=ui.usb_ready=ui.init_ok=ui.init_sent=0;
@@ -602,6 +607,15 @@ int main(int argc,char **argv) {
         }
         if(!completed && attached_dev>=0 && !detached) {
             if(cfg_ok && int_pipe<0 && candidate_ep) {
+                if(gh_game_shape && candidate_out_ep && out_pipe<0) {
+                    out_pipe=usbOpenPipe(attached_dev,candidate_out_ep);
+                    emit_rc("open_game_required_interrupt_out_pipe",out_pipe);
+                    if(out_pipe<0) {
+                        gh_game_shape=0;
+                        ui.game_shape_ok=0;
+                        last_error("game-required interrupt OUT pipe open",out_pipe);
+                    }
+                }
                 int_pipe=usbOpenPipe(attached_dev,candidate_ep);
                 emit_rc("open_interrupt_pipe_after_configuration",int_pipe);
                 if(int_pipe<0)last_error("open interrupt endpoint",int_pipe);
@@ -662,7 +676,8 @@ int main(int argc,char **argv) {
         snprintf(ui.verdict,sizeof(ui.verdict),"%s",
                  ghl_preflight_verdict(&preflight,
                  ui.receiver && have_device_desc,gh_game_shape,
-                 ui.configuration_ok,ui.init_ok,(unsigned)ui.total_errors,completed));
+                 ui.configuration_ok,ui.init_ok && keepalive_acks>=2,
+                 (unsigned)ui.total_errors,completed));
 
         {
             int start_down=pad_ready && controller_start();
@@ -679,6 +694,11 @@ int main(int argc,char **argv) {
         if(completed && !final_written) {
             pump_events();
             emit("capture_complete",NULL);
+            snprintf(ui.verdict,sizeof(ui.verdict),"%s",
+                 ghl_preflight_verdict(&preflight,
+                 ui.receiver && have_device_desc,gh_game_shape,
+                 ui.configuration_ok,ui.init_ok && keepalive_acks>=2,
+                 (unsigned)ui.total_errors,1));
             summary=fopen(sum_path,"wb");
             if(summary) {
                 fprintf(summary,"GHL PS4 dongle preflight v0.7 (not an in-game compatibility proof)\n");
@@ -686,6 +706,7 @@ int main(int argc,char **argv) {
                 fprintf(summary,"The verdict covers standalone USB access only; NOT EBOOT booting, game USB ownership or injected game hooks.\n");
                 fprintf(summary,"Game HID interface shape (from independently analyzed EBOOT): %d\n",gh_game_shape);
                 fprintf(summary,"Matching game USB interface: HID class 3, protocol 0, 2 interrupt endpoints (IN+OUT), one config interface\n");
+                fprintf(summary,"PS4 init keepalive callbacks successful: %u (requires 2)\n",keepalive_acks);
                 fprintf(summary,"PS4 report IDs/lengths valid: %u / %u (invalid %u)\n",
                         preflight.usable_reports,preflight.raw_reports,preflight.invalid_reports);
                 fprintf(summary,"PS4 guitar isConnected: 1 in %u frames, 0 in %u, unknown %u\n",
@@ -759,6 +780,7 @@ int main(int argc,char **argv) {
     else msgDialogAbort();
     if(registered)usbUnregisterExtraLdd(&ldd);
     if(int_pipe>=0 && !in_flight)usbClosePipe(int_pipe);
+    if(out_pipe>=0)usbClosePipe(out_pipe);
     if(ctrl_pipe>=0 && !out_flight)usbClosePipe(ctrl_pipe);
     if(usb_initialized) {
         if(!in_flight && in_data)usbFreeMemory(in_data);
