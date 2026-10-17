@@ -111,8 +111,9 @@ void ghl_ui_draw(const GhlDashboardState *s) {
     for(i=0;i<n;i++)pixels[i]=DARK;
 
     rect(0,0,1280,9,BLUE);
-    text_at(75,35,WHITE,"GHL PS4 DONGLE DIAGNOSTIC  v0.6 ONEPASS");
-    text_at(75,67,MUTED,"EXPERIMENTAL - USB evidence, not proof of guitar pairing");
+    text_at(75,35,WHITE,"GHL PS4 DONGLE PREFLIGHT  v0.7");
+    text_at(75,67,s->finished?(strncmp(s->verdict,"PREFLIGHT PASS",14)==0?GREEN:RED):YELLOW,
+            s->verdict[0]?s->verdict:"WAIT: INITIALIZING USB");
 
     card(55,95,1170,235);
     status(119,"USB RECEIVER",
@@ -123,32 +124,35 @@ void ghl_ui_draw(const GhlDashboardState *s) {
         s->configuration_ok?"SET_CONFIGURATION CALLBACK OK":
         s->receiver?"PENDING / SEE ERROR":"NOT AVAILABLE",
         s->configuration_ok?2:1);
-    status(203,"USB INTERFACE",
-        s->usb_ready?"DESCRIPTORS + PIPES READY":
-       s->receiver?"OPENING / CHECKING ENDPOINTS":"NOT AVAILABLE",
-        s->usb_ready?2:1);
+    status(203,"GHL GAME HID SHAPE",
+        s->game_shape_ok?"ONE HID + INTERRUPT IN/OUT":
+        s->receiver?"INCOMPATIBLE OR INCOMPLETE":"NOT AVAILABLE",
+        s->game_shape_ok?2:(s->receiver?3:1));
     status(245,"PS4 INIT (0x30)",
         s->init_ok?"SET_REPORT ACKNOWLEDGED":
         s->init_error?"SET_REPORT ERROR":
         s->init_sent?"SENT - AWAITING CALLBACK":"NOT SENT",
         s->init_ok?2:(s->init_error?3:1));
     status(287,"GUITAR INPUT",
-        s->input_reports>0 ?
-          (s->input_changes>0?"REPORTS + CHANGES OBSERVED":"REPORTS ARRIVING - NO CHANGE YET"):
-          "NO REPORTS YET | PAIRING UNKNOWN",
-        s->input_changes>0?2:1);
+        s->guitar_connected ? "ISCONNECTED=1 + USB REPORTS":
+        s->input_reports>0 ? "RAW REPORTS - NOT CONNECTED":
+        "NO REPORTS / NO PAIRING EVIDENCE",
+        s->guitar_connected?2:1);
 
     card(55,343,1170,95);
     snprintf(line,sizeof(line),"REPORTS  %d",s->input_reports);text_at(90,366,WHITE,line);
     snprintf(line,sizeof(line),"CHANGES  %d",s->input_changes);text_at(455,366,WHITE,line);
     snprintf(line,sizeof(line),"ERRORS  %d",s->total_errors);text_at(833,366,s->total_errors?RED:GREEN,line);
-    snprintf(line,sizeof(line),"DROPPED EVENTS  %d",s->dropped_events);
+    snprintf(line,sizeof(line),"STAGES  %d/12    VALID %d",s->passed_stages,
+             s->compatible_reports);
     text_at(833,406,MUTED,line);
 
     card(55,449,1170,169);
     if(s->finished) {
-        text_at(81,476,GREEN,"CAPTURE COMPLETE - RESULTS REMAIN ON SCREEN");
-        text_at(81,514,WHITE,"Press START on a normal PS3 controller to exit.");
+        text_at(81,476,GREEN,"CAPTURE COMPLETE - FINAL PREFLIGHT");
+        snprintf(line,sizeof(line),"ACTION STAGES %d/12  |  %s",s->passed_stages,s->verdict);
+        text_at(81,514,WHITE,line);
+        text_at(81,541,MUTED,"Release START, then press START again to exit.");
     } else if(s->stage<0) {
         text_at(81,475,YELLOW,"WAITING: TEST TIMER IS PAUSED");
         text_at(81,508,WHITE,s->reason);
