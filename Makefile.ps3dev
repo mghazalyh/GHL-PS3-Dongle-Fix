@@ -9,17 +9,21 @@ TITLE := GHL PS4 USB Diagnostic
 APPID := GHLPR0001
 CONTENTID := UP0001-GHLPR0001_00-PS4USBPROBE00001
 TARGET := ghl_ps4_probe
-OFILES := main.o
-CFLAGS += -std=gnu11 -O2 -Wall -Wextra $(MACHDEP) $(LIBPSL1GHT_INC)
+OFILES := main.o dashboard.o rsxutil.o
+CFLAGS += -std=gnu11 -O2 -Wall -Wextra -Werror=implicit-function-declaration $(MACHDEP) $(LIBPSL1GHT_INC)
 LDFLAGS += $(MACHDEP)
-LIBS := -lusb -lsysmodule -lsysutil -lrt -llv2 -lm
+LIBS := -lusb -lgcm_sys -lrsx -lio -lsysmodule -lsysutil -lrt -llv2 -lm
 LIBPATHS := $(LIBPSL1GHT_LIB)
 
 .PHONY: all clean
 all: $(TARGET).pkg
 main.o: source/main.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -Isource -c $< -o $@
+dashboard.o: source/dashboard.c source/dashboard.h source/font8x8_basic.h source/rsxutil.h
+	$(CC) $(CFLAGS) -Isource -c $< -o $@
+rsxutil.o: source/rsxutil.c source/rsxutil.h
+	$(CC) $(CFLAGS) -Isource -c $< -o $@
 $(TARGET).elf: $(OFILES)
 	$(CC) $(OFILES) $(LDFLAGS) $(LIBPATHS) $(LIBS) -o $@
 clean:
-	rm -rf main.o $(TARGET).elf $(TARGET).self $(TARGET).fake.self $(TARGET).pkg $(TARGET).gnpdrm.pkg build
+	rm -rf $(OFILES) $(TARGET).elf $(TARGET).self $(TARGET).fake.self $(TARGET).pkg $(TARGET).gnpdrm.pkg build
