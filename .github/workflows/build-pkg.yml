@@ -2,6 +2,10 @@ name: Build PS3 GHL v0.6 comprehensive diagnostic PKG
 on:
   push:
     branches: [main]
+    paths:
+      - 'source/**'
+      - 'Makefile.ps3dev'
+      - '.github/workflows/build-pkg.yml'
   workflow_dispatch:
 
 permissions:
