@@ -1,4 +1,4 @@
-# PS3 GHL PS4 dongle preflight v0.7.1 — before trying the modified EBOOT
+# PS3 GHL PS4 dongle preflight v0.7.2 — before trying the modified EBOOT
 
 **Standalone PS3 CFW package.** Install this homebrew package on Evilnat 4.92.
 It **does not patch or launch Guitar Hero Live**, does not modify the ISO,
@@ -37,11 +37,36 @@ EBOOT (SHA256 `c1817fc3506b776125b6cc81b0f4d035e417a10dc7eda464e8874b4d7b7d785f`
 - **ERROR CODE**: last USB operation failure; results and errors persist
   as a summary even after the timed capture
 
+## Boot display and recovery
+
+v0.7.2 draws a **full-screen startup dashboard before initializing USB or
+network services**. It shows a bright heading, readiness status and a heartbeat
+box with `APP ALIVE NNNNs` ticking even with the dongle unplugged. A normal
+boot should not remain a blank screen while simply waiting for the receiver.
+
+**Alternative display mode:** if your PS3 does not show the custom RSX
+dashboard, fully exit the app, relaunch it while holding **L1+R1** on a normal
+PS3 controller, and keep those buttons held briefly during startup. This
+forces a native PS3 two-progress-bar status dialog instead of allocating RSX
+framebuffers. L1+R1 detection runs during the first ~0.6 seconds after the
+app starts. The dialog displays live receiver/errors/test instructions.
+
+If the default renderer returns a startup failure, it also attempts to open
+that native system dialog automatically.
+
+**Limits:** a console-level RSX deadlock, early crash, or HDMI/video-mode
+failure could still show black before the fallback is invoked. This code has
+been cross-compiled and inspected, but not tested on the user's hardware.
+If neither mode displays anything, report what happens rather than waiting
+indefinitely or assuming the dongle is the problem. Holding the PS button
+should ordinarily allow returning to XMB; if the console is unresponsive,
+follow normal console recovery steps.
+
 ## Step-by-step test
 
-1. Go to the repository's **Actions -> Build PS3 GHL v0.7.1 EBOOT preflight PKG**
+1. Go to the repository's **Actions -> Build PS3 GHL v0.7.2 EBOOT preflight PKG**
    and open the latest **successful** run. Download the artifact named
-   `GHL-PS3-EBOOT-Preflight-v0.7.1-PKG`.
+   `GHL-PS3-EBOOT-Preflight-v0.7.2-PKG`.
 2. Extract the ZIP, copy `ghl_ps4_probe.pkg` to a FAT32 USB thumb drive.
 3. On your Evilnat 4.92 PS3, use XMB -> Package Manager ->
    Install Package Files. This installs **only** the preflight application.
