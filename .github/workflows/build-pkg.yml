@@ -1,0 +1,43 @@
+name: Build PS3 GHL receiver diagnostic PKG
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ps3-pkg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned PS3DEV Linux SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output /tmp/ps3dev.tar.gz "https://github.com/ps3dev/ps3dev/releases/download/nightly-2026-10-12/ps3dev-linux-X64.tar.gz"
+          mkdir -p "$GITHUB_WORKSPACE/sdk"
+          tar -xzf /tmp/ps3dev.tar.gz -C "$GITHUB_WORKSPACE/sdk"
+          echo "PS3DEV=$GITHUB_WORKSPACE/sdk/ps3dev" >> "$GITHUB_ENV"
+          echo "PSL1GHT=$GITHUB_WORKSPACE/sdk/ps3dev" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/sdk/ps3dev/bin" >> "$GITHUB_PATH"
+          echo "$GITHUB_WORKSPACE/sdk/ps3dev/ppu/bin" >> "$GITHUB_PATH"
+      - name: Compile and package from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -f Makefile.ps3dev clean
+          make -f Makefile.ps3dev all
+          test -s ghl_ps4_probe.pkg
+          file ghl_ps4_probe.pkg
+          pkg --list ghl_ps4_probe.pkg
+          sha256sum ghl_ps4_probe.pkg > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GHL-PS3-Fresh-Diagnostic-PKG
+          path: |
+            ghl_ps4_probe.pkg
+            SHA256SUMS.txt
+          if-no-files-found: error
