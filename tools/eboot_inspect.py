@@ -77,7 +77,7 @@ def inspect_blob(name, raw):
         "header_hex":raw[:64].hex(" "),
         "sfo":sfo_info(raw) if kind=="PARAM.SFO" else {},
     }
-    if "ELF" in kind:
+    if kind.startswith("ELF"):
         result["elf_class"]="ELF64" if len(raw)>5 and raw[4]==2 else "ELF32"
         result["elf_endianness"]="big" if len(raw)>6 and raw[5]==2 else "little"
     elif "SELF" in kind:
