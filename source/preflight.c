@@ -10,6 +10,7 @@ void ghl_preflight_reset(GhlPreflight *p){
     memset(p,0,sizeof(*p));
     p->previous_length=-1;
     p->previous_stage=-999;
+    p->latest_connected=-1;
 }
 static int stage_action(const uint8_t *d,int stage){
     int frets=(int)((d[5]>>4)&15u) + (int)((d[6]&3u)<<4);
@@ -38,13 +39,25 @@ void ghl_preflight_feed(GhlPreflight *p,const uint8_t *data,size_t n,int stage){
     if(n<26 || data[0]!=0x01){
         p->invalid_reports++;
         p->connection_unknown++;
+        p->latest_connected=-1;
+        p->consecutive_connected=0;
         p->previous_length=-1;
         return;
     }
     p->usable_reports++;
-    if(data[25]==1)p->connection_yes++;
-    else if(data[25]==0)p->connection_no++;
-    else p->connection_unknown++;
+    if(data[25]==1){
+        p->connection_yes++;
+        p->latest_connected=1;
+        if(p->consecutive_connected<1000000u)p->consecutive_connected++;
+    } else if(data[25]==0){
+        p->connection_no++;
+        p->latest_connected=0;
+        p->consecutive_connected=0;
+    } else {
+        p->connection_unknown++;
+        p->latest_connected=-1;
+        p->consecutive_connected=0;
+    }
     p->fret_mask|=((unsigned)data[5]>>4)&0xfu;
     p->fret_mask|=((unsigned)data[6]&3u)<<4;
     if(data[2]<0x40u)p->strum_directions|=1u;
@@ -83,7 +96,8 @@ const char *ghl_preflight_verdict(const GhlPreflight *p,int usb_claim,
     if(!config_ok)return finished?"NO-GO: USB CONFIG":"WAIT: SET CONFIG";
     if(!keepalive_ok)return finished?"NO-GO: PS4 INIT":"WAIT: PS4 INIT";
     if(p->usable_reports==0)return finished?"NO-GO: NO PS4 INPUT":"WAIT: PS4 REPORTS";
-    if(p->connection_yes==0)return finished?"NO-GO: NO CONNECTION FLAG":"WAIT: PAIR GUITAR";
+    if(p->latest_connected!=1 || p->consecutive_connected<3)
+        return finished?"NO-GO: GUITAR NOT CONNECTED":"WAIT: PAIR GUITAR";
     if(!finished)return "TEST: PRESS REQUESTED CONTROLS";
     if(errors>0)return "INCONCLUSIVE: USB ERRORS";
     if(ghl_preflight_stages_passed(p)<GHL_PREFLIGHT_REQUIRED_STAGES)
