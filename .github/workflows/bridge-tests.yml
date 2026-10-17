@@ -1,0 +1,31 @@
+name: Validate PS4-PS3 GHL bridge offline
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bridge/**'
+      - 'tests/test_ghl_translate.c'
+      - '.github/workflows/bridge-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile portable translator (strict compiler diagnostics)
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcc -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic \
+            bridge/ghl_translate.c tests/test_ghl_translate.c -o /tmp/ghl_map_test
+      - name: Run synthetic PS4/PS3 input mapping tests
+        shell: bash
+        run: |
+          /tmp/ghl_map_test
+          echo "NOTE: Offline mapping tests use synthetic PS4 reports only."
+          echo "Passing tests do not establish physical dongle or game compatibility."
