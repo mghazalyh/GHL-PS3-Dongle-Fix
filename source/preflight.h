@@ -10,7 +10,9 @@ typedef struct {
     unsigned invalid_reports;
     unsigned connection_yes;         /* reported PS4 guitar isConnected = 1 at byte25 */
     unsigned connection_no;          /* same field = 0 */
-    unsigned connection_unknown;     /* other field value / short report */
+    unsigned connection_unknown;
+    int latest_connected;           /* -1 unknown, 0 disconnected, 1 connected */
+    unsigned consecutive_connected;     /* other field value / short report */
     unsigned stage_frames[GHL_PREFLIGHT_STAGES];
     unsigned stage_actions[GHL_PREFLIGHT_STAGES];
     unsigned fret_mask;
