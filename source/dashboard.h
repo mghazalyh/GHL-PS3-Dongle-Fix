@@ -7,6 +7,8 @@ typedef struct {
     int keepalive_acks;
     int passed_stages;
     char verdict[80];
+    int startup_phase;      /* 0 boot, 1 display online, 2 network, 3 USB ready */
+    int safe_dialog_mode;   /* User-chosen no-RSX startup */
     int receiver;           /* Device attach callback received */
     int usb_ready;
     int configuration_ok;          /* Descriptor and both required pipes present */
