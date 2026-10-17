@@ -45,6 +45,9 @@ static usbDeviceRequest out_req;
 static FILE *logfile;
 static unsigned report_count, usb_errors, attach_count, control_count, detach_count;
 static unsigned receiver_session_reports;
+static unsigned stage_report_count[12], stage_change_count[12];
+static unsigned stage_byte_flips[12][64];
+static unsigned long long last_flush_ms;
 static unsigned long long started_ms;
 static unsigned long long test_started_ms, next_in_retry_ms;
 static int have_device_desc, have_config_desc, have_interface_desc, have_interrupt_ep;
@@ -121,7 +124,7 @@ static void emit(const char *event, const char *extra) {
     if (!logfile) return;
     fprintf(logfile, "{\"t_ms\":%llu,\"event\":\"%s\",\"stage\":\"%s\"%s}\n",
             elapsed(), event, test_started_ms ? stages[stage_for(test_time_ms())] : "waiting", extra ? extra : "");
-    fflush(logfile);
+    /* Buffered writes protect USB timing; main loop flushes every 250ms. */
 }
 static void emit_rc(const char *name, int rc) {
     char buf[100]; snprintf(buf,sizeof(buf),",\"rc\":%d",rc);
@@ -198,6 +201,18 @@ static void pump_events(void) {
                     ui.input_changes++;
                     emit("input_change",extra);
                 }
+                if(test_started_ms) {
+                    int st=stage_for(test_time_ms());
+                    stage_report_count[st]++;
+                    if(previous_length>=0 &&
+                       (previous_length!=n || memcmp(previous_report,e.data,(size_t)n)!=0)) {
+                        stage_change_count[st]++;
+                        for(i=0;i<n;i++) {
+                            if(i>=previous_length || previous_report[i]!=e.data[i])
+                                stage_byte_flips[st][i]++;
+                        }
+                    }
+                }
                 memcpy(previous_report,e.data,(size_t)n);
                 previous_length=n;
                 {
@@ -247,7 +262,14 @@ static void inspect_descriptors(int dev) {
                  (unsigned)dd->bcdUSB,(unsigned)dd->bcdDevice,
                  (unsigned)dd->bDeviceClass,(unsigned)dd->bNumConfigurations);
         emit("device_descriptor",s);
-        have_device_desc=(dd->idVendor==GHL_VID && dd->idProduct==GHL_PID);
+        /* USB descriptor multi-byte values can be exposed as raw wire-LE or host-order
+           on big-endian PowerPC; record and accept both representations. */
+        have_device_desc=((dd->idVendor==GHL_VID && dd->idProduct==GHL_PID) ||
+             (dd->idVendor==0x3014 && dd->idProduct==0xBB07));
+        snprintf(s,sizeof(s),",\"raw_vendor_field\":%u,\"raw_product_field\":%u,\"matched\":%s",
+                 (unsigned)dd->idVendor,(unsigned)dd->idProduct,
+                 have_device_desc?"true":"false");
+        emit("device_field_endian_check",s);
     } else emit("device_descriptor_missing",NULL);
     usbConfigDescriptor *cd=(usbConfigDescriptor*)usbScanStaticDescriptor(dev,NULL,USB_DESCRIPTOR_TYPE_CONFIG);
     if(cd) {
@@ -273,6 +295,10 @@ static void inspect_descriptors(int dev) {
         emit("endpoint_descriptor",s);
         if((ep->bEndpointAddress&0x80) && ((ep->bmAttributes&3)==USB_ENDPOINT_TRANSFER_TYPE_INTERRUPT)) {
             in_size=ep->wMaxPacketSize;
+            if(in_size>255 && ((in_size&0xff)==0)) {
+                /* Reverse the likely big-endian reinterpretation of wire-LE. */
+                in_size=(int)((unsigned)in_size>>8);
+            }
             if(in_size<1||in_size>USB_PACKET) in_size=USB_PACKET;
             int_pipe=usbOpenPipe(dev,ep);
             emit_rc("open_interrupt_pipe",int_pipe);
@@ -334,6 +360,7 @@ int main(int argc,char **argv) {
     FILE *summary;
 
     started_ms=milliseconds();
+    last_flush_ms=started_ms;
     memset(&ui,0,sizeof(ui));
     ui.stage=-1;
     prepare_log();
@@ -506,6 +533,17 @@ int main(int argc,char **argv) {
                         attach_count,detach_count,control_count);
                 fprintf(summary,"Event queue dropped: %u\nLast error: %s 0x%08X\n",
                         dropped,ui.last_operation,(unsigned)ui.last_error);
+                fprintf(summary,"Stage report/change byte summaries (byte indices are zero-based):\n");
+                {
+                    int st,b;
+                    for(st=0;st<12;st++) {
+                        fprintf(summary,"%02d %-24s reports=%u changed=%u  hotspots=",
+                                st+1,stages[st],stage_report_count[st],stage_change_count[st]);
+                        for(b=0;b<64;b++) if(stage_byte_flips[st][b]>0)
+                            fprintf(summary," %d:%u",b,stage_byte_flips[st][b]);
+                        fputc('\n',summary);
+                    }
+                }
                 fprintf(summary,"Telemetry: %s\n",log_path);
                 fprintf(summary,"Raw report changes are NOT proof of successful guitar pairing.\n");
                 fclose(summary);
@@ -527,6 +565,10 @@ int main(int argc,char **argv) {
                 msgDialogProgressBarSetMsg(MSG_PROGRESSBAR_INDEX1,b);
             }
             last_draw_ms=now;
+        }
+        if(logfile && now-last_flush_ms>=250ULL) {
+            fflush(logfile);
+            last_flush_ms=now;
         }
         sysUtilCheckCallback();
         usleep(16000);
