@@ -430,7 +430,7 @@ int main(int argc,char **argv) {
     ui.stage=-1;
     prepare_log();
     snprintf(ui.log_path,sizeof(ui.log_path),"%s",log_path);
-    emit("start",",\"version\":\"v0.5-live\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
+    emit("start",",\"version\":\"v0.6-onepass\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
     sysMutexAttrInitialize(mattr);
     rc=sysMutexCreate(&q_mutex,&mattr);
     mutex_ok=(rc==0);
@@ -623,7 +623,7 @@ int main(int argc,char **argv) {
             emit("capture_complete",NULL);
             summary=fopen(sum_path,"wb");
             if(summary) {
-                fprintf(summary,"GHL PS4 dongle diagnostic v0.5-live\n");
+                fprintf(summary,"GHL PS4 dongle diagnostic v0.6-onepass\n");
                 fprintf(summary,"Target USB VID:PID 1430:07BB\n");
                 fprintf(summary,"Receiver detected: %d\nUSB interface ready: %d\n",ui.receiver,ui.usb_ready);
                 fprintf(summary,"HID SET_REPORT success callback observed: %d\n",ui.init_ok);
