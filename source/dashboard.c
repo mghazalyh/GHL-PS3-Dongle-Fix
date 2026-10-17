@@ -111,7 +111,7 @@ void ghl_ui_draw(const GhlDashboardState *s) {
     for(i=0;i<n;i++)pixels[i]=DARK;
 
     rect(0,0,1280,9,BLUE);
-    text_at(75,35,WHITE,"GHL PS4 DONGLE DIAGNOSTIC  v0.5 LIVE");
+    text_at(75,35,WHITE,"GHL PS4 DONGLE DIAGNOSTIC  v0.6 ONEPASS");
     text_at(75,67,MUTED,"EXPERIMENTAL - USB evidence, not proof of guitar pairing");
 
     card(55,95,1170,235);
