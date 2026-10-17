@@ -9,6 +9,10 @@ typedef struct {
     int input_reports;      /* Number of successful nonempty input reports */
     int input_changes;      /* Count of payload changes, not inferred buttons */
     int input_error;
+    int network_ready;
+    int input_timeout_warned;
+    int control_timeout_warned;
+    char network_ip[32];
     int total_errors;
     int dropped_events;
     int elapsed_seconds;
