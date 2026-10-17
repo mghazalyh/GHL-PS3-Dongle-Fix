@@ -212,7 +212,7 @@ static void pump_events(void) {
                 receiver_session_reports++;
                 ghl_preflight_feed(&preflight,e.data,(size_t)n,
                     test_started_ms ? stage_for(test_time_ms()) : -1);
-                ui.guitar_connected=(preflight.connection_yes>0);
+                ui.guitar_connected=(preflight.latest_connected==1 && preflight.consecutive_connected>=3);
                 ui.compatible_reports=(int)preflight.usable_reports;
                 ui.passed_stages=(int)ghl_preflight_stages_passed(&preflight);
                 ui.input_reports=(int)report_count;
@@ -475,7 +475,7 @@ int main(int argc,char **argv) {
     ui.stage=-1;
     prepare_log();
     snprintf(ui.log_path,sizeof(ui.log_path),"%s",log_path);
-    emit("start",",\"version\":\"v0.7-preflight\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
+    emit("start",",\"version\":\"v0.7.1-preflight\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
     sysMutexAttrInitialize(mattr);
     rc=sysMutexCreate(&q_mutex,&mattr);
     mutex_ok=(rc==0);
@@ -632,7 +632,8 @@ int main(int argc,char **argv) {
         pump_events();
 
         if(!completed) {
-            if(ui.usb_ready && ui.init_ok && receiver_session_reports>0) {
+            if(ui.usb_ready && ui.init_ok && receiver_session_reports>0 &&
+               preflight.latest_connected==1 && preflight.consecutive_connected>=3) {
                 if(!test_started_ms) {
                     test_started_ms=milliseconds();
                     emit("guided_testing_started",NULL);
@@ -666,7 +667,9 @@ int main(int argc,char **argv) {
                 else if(!ui.usb_ready)
                     snprintf(ui.reason,sizeof(ui.reason),"USB descriptors or interrupt pipe unavailable.");
                 else if(!ui.init_ok)snprintf(ui.reason,sizeof(ui.reason),"Waiting for HID SET_REPORT success. Timer paused.");
-                else snprintf(ui.reason,sizeof(ui.reason),"Pair guitar, press frets: waiting for raw input reports.");
+                else if(preflight.latest_connected!=1 || preflight.consecutive_connected<3)
+                    snprintf(ui.reason,sizeof(ui.reason),"Receiver sends input; GUITAR NOT CONNECTED. Pair guitar.");
+                else snprintf(ui.reason,sizeof(ui.reason),"Waiting for valid guitar reports.");
             }
         }
 
@@ -701,7 +704,7 @@ int main(int argc,char **argv) {
                  (unsigned)ui.total_errors,1));
             summary=fopen(sum_path,"wb");
             if(summary) {
-                fprintf(summary,"GHL PS4 dongle preflight v0.7 (not an in-game compatibility proof)\n");
+                fprintf(summary,"GHL PS4 dongle preflight v0.7.1 (not an in-game compatibility proof)\n");
                 fprintf(summary,"PREFLIGHT VERDICT: %s\n",ui.verdict);
                 fprintf(summary,"The verdict covers standalone USB access only; NOT EBOOT booting, game USB ownership or injected game hooks.\n");
                 fprintf(summary,"Game HID interface shape (from independently analyzed EBOOT): %d\n",gh_game_shape);
@@ -709,6 +712,8 @@ int main(int argc,char **argv) {
                 fprintf(summary,"PS4 init keepalive callbacks successful: %u (requires 2)\n",keepalive_acks);
                 fprintf(summary,"PS4 report IDs/lengths valid: %u / %u (invalid %u)\n",
                         preflight.usable_reports,preflight.raw_reports,preflight.invalid_reports);
+                fprintf(summary,"PS4 guitar CURRENT connection: %d; consecutive live connected frames: %u\n",
+                        preflight.latest_connected,preflight.consecutive_connected);
                 fprintf(summary,"PS4 guitar isConnected: 1 in %u frames, 0 in %u, unknown %u\n",
                         preflight.connection_yes,preflight.connection_no,preflight.connection_unknown);
                 fprintf(summary,"Observed action stages: %u / 12 (target 7+, including both strum directions)\n",
