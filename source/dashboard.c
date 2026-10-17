@@ -152,7 +152,7 @@ void ghl_ui_draw(const GhlDashboardState *s) {
     } else {
         text_at(81,475,GREEN,"CURRENT TEST");
         text_at(81,508,WHITE,s->reason);
-        snprintf(line,sizeof(line),"STAGE %d/9   ACTIVE TEST %d / 180 SECONDS",
+        snprintf(line,sizeof(line),"STAGE %d/12   ACTIVE TEST %d / 180 SECONDS",
                  s->stage+1,s->testing_seconds);
         text_at(81,541,MUTED,line);
     }
@@ -164,7 +164,11 @@ void ghl_ui_draw(const GhlDashboardState *s) {
                  s->last_operation,(unsigned)s->last_error,s->last_error);
         text_at(65,639,RED,line);
     } else text_at(65,639,MUTED,"ERROR: NONE RECORDED (NOT EVIDENCE OF COMPATIBILITY)");
-    text_at(65,668,MUTED,"Telemetry saved to /dev_hdd0/tmp/GHLPROBE/  |  Press START to end test");
+    if(s->network_ready) {
+        snprintf(line,sizeof(line),"LAN LOGS: http://%s:8895/  |  PS3 + PC on same LAN",
+                 s->network_ip[0]?s->network_ip:"PS3_IP");
+        text_at(65,668,GREEN,line);
+    } else text_at(65,668,MUTED,"Logs in /dev_hdd0/tmp/GHLPROBE/  |  LAN export unavailable");
     flip(context,buffers[active].id);
     active=(active+1)%BUFFER_COUNT;
 }
