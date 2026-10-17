@@ -17,6 +17,8 @@
 #include <sysutil/sysutil.h>
 #include <sysutil/msg.h>
 #include <usb/usb.h>
+#include <io/pad.h>
+#include "dashboard.h"
 
 #define GHL_VID 0x1430
 #define GHL_PID 0x07bb
@@ -42,6 +44,13 @@ static usbDeviceRequest out_req;
 static FILE *logfile;
 static unsigned report_count, usb_errors, attach_count, control_count, detach_count;
 static unsigned long long started_ms;
+static unsigned long long test_started_ms, next_in_retry_ms;
+static int have_device_desc, have_config_desc, have_interface_desc, have_interrupt_ep;
+static unsigned char previous_report[USB_PACKET];
+static int previous_length = -1;
+static GhlDashboardState ui;
+static volatile int completed;
+static int sysutil_exit_requested;
 static const char *log_path = "/dev_hdd0/tmp/GHLPROBE/telemetry.jsonl";
 static const char *sum_path = "/dev_hdd0/tmp/GHLPROBE/summary.txt";
 
@@ -55,20 +64,58 @@ static unsigned long long elapsed(void) {
     return now >= started_ms ? now-started_ms : 0;
 }
 static const char *stages[] = {
-    "pair_guitar", "black_frets_1_2_3", "white_frets_1_2_3",
-    "strum_up_down", "fret_chords_and_strum", "whammy",
-    "tilt", "menu_and_hero_power", "repeat_inputs", "finish"
+    "black_fret_1", "black_fret_2", "black_fret_3",
+    "white_fret_1", "white_fret_2", "white_fret_3",
+    "strum_up", "strum_down", "chords_and_strum",
+    "whammy", "tilt", "menu_hero_power"
 };
-static const int stage_start[] = {0,15,35,55,75,95,115,135,155,175};
+static const char *instructions[] = {
+    "Press BLACK fret 1 repeatedly",
+    "Press BLACK fret 2 repeatedly",
+    "Press BLACK fret 3 repeatedly",
+    "Press WHITE fret 1 repeatedly",
+    "Press WHITE fret 2 repeatedly",
+    "Press WHITE fret 3 repeatedly",
+    "Strum UP repeatedly without frets",
+    "Strum DOWN repeatedly without frets",
+    "Hold fret chords and strum",
+    "Move the whammy bar repeatedly",
+    "Tilt the guitar up and down",
+    "Press Hero Power and menu buttons"
+};
 static int stage_for(unsigned long long tms) {
-    int i; int sec = (int)(tms/1000);
-    for (i=9;i>0;i--) if (sec>=stage_start[i]) return i;
+    int i=(int)(tms / 15000ULL);
+    return i>11?11:i;
+}
+static unsigned long long test_time_ms(void) {
+    return test_started_ms ? milliseconds()-test_started_ms : 0;
+}
+static void last_error(const char *op,int rc) {
+    if(rc==0) return;
+    ui.total_errors++;
+    ui.last_error=rc;
+    snprintf(ui.last_operation,sizeof(ui.last_operation),"%s",op);
+    char buf[160];snprintf(buf,sizeof(buf),
+      ",\"operation\":\"%s\",\"rc\":%d,\"rc_hex\":\"0x%08X\"",
+      op,rc,(unsigned)rc);
+    emit("error",buf);
+}
+static void sysutil_callback(u64 status,u64 param,void *user) {
+    (void)param;(void)user;
+    if(status==SYSUTIL_EXIT_GAME) sysutil_exit_requested=1;
+}
+static int controller_start(void) {
+    padInfo info;padData data;int i;
+    if(ioPadGetInfo(&info)!=PAD_OK) return 0;
+    for(i=0;i<7;i++) if(info.status[i]) {
+        if(ioPadGetData(i,&data)==PAD_OK && data.BTN_START) return 1;
+    }
     return 0;
 }
 static void emit(const char *event, const char *extra) {
     if (!logfile) return;
     fprintf(logfile, "{\"t_ms\":%llu,\"event\":\"%s\",\"stage\":\"%s\"%s}\n",
-            elapsed(), event, stages[stage_for(elapsed())], extra ? extra : "");
+            elapsed(), event, test_started_ms ? stages[stage_for(test_time_ms())] : "waiting", extra ? extra : "");
     fflush(logfile);
 }
 static void emit_rc(const char *name, int rc) {
@@ -116,6 +163,7 @@ static usbLddOps ldd={ "GHL PS4 receiver probe", probe, attach, detach };
 static void on_interrupt(s32 result, s32 count, void *arg) {
     (void)arg;
     enqueue('I',device_id,result,count, result==0?in_data:NULL);
+    if(result!=0) next_in_retry_ms=milliseconds()+450;
     in_flight=0;
 }
 static void on_control(s32 result, s32 count, void *arg) {
@@ -128,25 +176,58 @@ static void pump_events(void) {
     while(pop_event(&e)) {
         char extra[USB_PACKET*2+150];
         if(e.kind=='I') {
-            int n=e.count;
-            int i;
+            int n=e.count, i;
             char hex[USB_PACKET*2+1];
-            if(n<0) n=0; if(n>USB_PACKET) n=USB_PACKET;
+            if(n<0)n=0;
+            if(n>USB_PACKET)n=USB_PACKET;
             for(i=0;i<n;i++) snprintf(hex+2*i,sizeof(hex)-2*(size_t)i,"%02x",e.data[i]);
             hex[2*n]='\0';
             snprintf(extra,sizeof(extra),",\"rc\":%d,\"length\":%d,\"hex\":\"%s\"",
                     e.result,e.count,hex);
             emit("interrupt_in",extra);
-            if(e.result==0) report_count++; else usb_errors++;
+            if(e.result==0 && e.count>0) {
+                report_count++;
+                ui.input_reports=(int)report_count;
+                if(previous_length>=0 && (previous_length!=n || memcmp(previous_report,e.data,(size_t)n)!=0)) {
+                    ui.input_changes++;
+                    emit("input_change",extra);
+                }
+                memcpy(previous_report,e.data,(size_t)n);
+                previous_length=n;
+                {
+                    int len=n>22?22:n;
+                    int off=0;
+                    for(i=0;i<len;i++) {
+                        off+=snprintf(ui.latest_report+off,sizeof(ui.latest_report)-(size_t)off,
+                                      "%02X%s",e.data[i],i==len-1?"":" ");
+                    }
+                    if(n>len)snprintf(ui.latest_report+off,sizeof(ui.latest_report)-(size_t)off," ...");
+                }
+            } else if(e.result!=0) {
+                usb_errors++;
+                ui.input_error=e.result;
+                last_error("interrupt transfer callback",e.result);
+            }
         } else {
             const char *kind=e.kind=='A'?"attach":e.kind=='D'?"detach":
                              e.kind=='C'?"set_report_complete":"probe";
             snprintf(extra,sizeof(extra),",\"device\":%d,\"rc\":%d,\"length\":%d",
                      e.device,e.result,e.count);
             emit(kind,extra);
-            if(e.kind=='A') attach_count++;
-            if(e.kind=='D') detach_count++;
-            if(e.kind=='C') {control_count++; if(e.result)usb_errors++;}
+            if(e.kind=='A'){attach_count++;ui.receiver=1;}
+            if(e.kind=='D') {
+                detach_count++;ui.receiver=0;ui.usb_ready=0;
+                ui.init_ok=0;ui.init_sent=0;
+                test_started_ms=0;previous_length=-1;
+            }
+            if(e.kind=='C') {
+                control_count++;
+                if(e.result==0)ui.init_ok=1;
+                else {
+                    ui.init_error=e.result;ui.init_ok=0;
+                    usb_errors++;last_error("HID SET_REPORT completion",e.result);
+                }
+            }
         }
     }
 }
@@ -159,12 +240,14 @@ static void inspect_descriptors(int dev) {
                  (unsigned)dd->bcdUSB,(unsigned)dd->bcdDevice,
                  (unsigned)dd->bDeviceClass,(unsigned)dd->bNumConfigurations);
         emit("device_descriptor",s);
+        have_device_desc=(dd->idVendor==GHL_VID && dd->idProduct==GHL_PID);
     } else emit("device_descriptor_missing",NULL);
     usbConfigDescriptor *cd=(usbConfigDescriptor*)usbScanStaticDescriptor(dev,NULL,USB_DESCRIPTOR_TYPE_CONFIG);
     if(cd) {
         snprintf(s,sizeof(s),",\"interfaces\":%u,\"total_length\":%u,\"configuration\":%u",
                 (unsigned)cd->bNumInterfaces,(unsigned)cd->wTotalLength,(unsigned)cd->bConfigurationValue);
         emit("config_descriptor",s);
+        have_config_desc=1;
     }
     usbInterfaceDescriptor *id=(usbInterfaceDescriptor*)usbScanStaticDescriptor(dev,NULL,USB_DESCRIPTOR_TYPE_INTERFACE);
     if(id) {
@@ -173,6 +256,7 @@ static void inspect_descriptors(int dev) {
                 (unsigned)id->bInterfaceNumber,(unsigned)id->bInterfaceClass,(unsigned)id->bInterfaceSubClass,
                 (unsigned)id->bInterfaceProtocol,(unsigned)id->bNumEndpoints);
         emit("interface_descriptor",s);
+        have_interface_desc=1;
     }
     usbEndpointDescriptor *ep=(usbEndpointDescriptor*)usbScanStaticDescriptor(dev,NULL,USB_DESCRIPTOR_TYPE_ENDPOINT);
     if(ep) {
@@ -185,6 +269,8 @@ static void inspect_descriptors(int dev) {
             if(in_size<1||in_size>USB_PACKET) in_size=USB_PACKET;
             int_pipe=usbOpenPipe(dev,ep);
             emit_rc("open_interrupt_pipe",int_pipe);
+            have_interrupt_ep=(int_pipe>=0);
+            if(int_pipe<0)last_error("open interrupt endpoint",int_pipe);
         }
     } else emit("endpoint_descriptor_missing",NULL);
     u8 speed=255;
@@ -203,15 +289,18 @@ static void send_keepalive(void) {
     out_flight=1;
     int rc=usbControlTransfer(ctrl_pipe,&out_req,out_data,on_control,NULL);
     emit_rc("set_report_submit",rc);
-    if(rc) {out_flight=0; usb_errors++;}
+    if(rc==0)ui.init_sent=1;
+    else {out_flight=0; usb_errors++;ui.init_error=rc;last_error("HID SET_REPORT submission",rc);}
 }
 static void listen_once(void) {
-    if(int_pipe<0 || in_flight) return;
+    if(int_pipe<0 || in_flight || milliseconds()<next_in_retry_ms) return;
     in_flight=1;
     int rc=usbInterruptTransfer(int_pipe,in_data,in_size,on_interrupt,NULL);
     if(rc) {
         in_flight=0;usb_errors++;
         emit_rc("interrupt_submit_error",rc);
+        next_in_retry_ms=milliseconds()+450;
+        last_error("interrupt transfer submit",rc);
     }
 }
 static void prepare_log(void) {
@@ -226,93 +315,198 @@ static void prepare_log(void) {
     }
 }
 int main(int argc,char **argv) {
-    (void)argc; (void)argv;
+    (void)argc;(void)argv;
     sys_mutex_attr_t mattr;
     int registered=0, attached_dev=-1, previous_stage=-1;
-    int rc, last_keepalive=-100;
-    unsigned long long deadline;
+    int rc, usb_initialized=0;
+    int pad_ready=0, graphics_ok=0, final_written=0;
+    unsigned long long last_keepalive_ms=0, last_draw_ms=0;
     FILE *summary;
+
     started_ms=milliseconds();
+    memset(&ui,0,sizeof(ui));
+    ui.stage=-1;
     prepare_log();
-    emit("start",",\"version\":\"v0.4-fresh\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
+    snprintf(ui.log_path,sizeof(ui.log_path),"%s",log_path);
+    emit("start",",\"version\":\"v0.5-live\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
     sysMutexAttrInitialize(mattr);
     rc=sysMutexCreate(&q_mutex,&mattr);
     mutex_ok=(rc==0);
     emit_rc("mutex_create",rc);
+    if(rc!=0)last_error("create telemetry mutex",rc);
+
+    rc=sysModuleLoad(SYSMODULE_SYSUTIL);
+    emit_rc("load_sysutil",rc);
+    sysUtilRegisterCallback(0,sysutil_callback,NULL);
+    pad_ready=(ioPadInit(7)==PAD_OK);
+    emit("pad_init",pad_ready?",\"available\":true":",\"available\":false");
+    graphics_ok=ghl_ui_init();
+    emit("graphics_init",graphics_ok?",\"available\":true":",\"available\":false");
+    if(!graphics_ok) {
+        /* Visible emergency fallback if RSX display allocation fails. */
+        msgDialogOpen2((msgType)(MSG_DIALOG_NORMAL|MSG_DIALOG_DOUBLE_PROGRESSBAR),
+            "GHL v0.5 LIVE: RSX unavailable. USB/live counters shown below.",
+            NULL,NULL,NULL);
+        last_error("RSX initialization unavailable",-1);
+    }
+
     rc=sysModuleLoad(SYSMODULE_USB);
-    emit_rc("usb_module_load",rc);
+    emit_rc("load_usb_module",rc);
+    if(rc!=0 && rc!=SYSMODULE_ERR_DUPLICATE)last_error("load USB module",rc);
     rc=usbInit();
     emit_rc("usb_init",rc);
-    if(rc==USB_OK) {
+    usb_initialized=(rc==USB_OK || rc==USB_ERR_ALREADY_INITIALIZED);
+    if(!usb_initialized) {
+        ui.usb_start_error=rc;
+        last_error("USB subsystem init",rc);
+    } else if(mutex_ok) {
         rc=usbRegisterExtraLdd(&ldd,GHL_VID,GHL_PID);
-        emit_rc("register_receiver_ldd",rc);
+        emit_rc("receiver_driver_register",rc);
         registered=(rc==USB_OK);
+        if(!registered)last_error("extra LDD register",rc);
     }
-    rc=sysModuleLoad(SYSMODULE_SYSUTIL);
-    emit_rc("sysutil_module_load",rc);
-    rc=msgDialogOpen2((msgType)(MSG_DIALOG_NORMAL|MSG_DIALOG_SINGLE_PROGRESSBAR),
-        "GHL PS4 USB probe: plug dongle in, pair guitar, follow stages. Capture: 180 seconds.",
-        NULL,NULL,NULL);
-    emit_rc("dialog_open",rc);
-    deadline=started_ms+(unsigned long long)DURATION_SEC*1000;
-    while(running && milliseconds()<deadline) {
+    /* Work forever while waiting for USB, but allow START to finish.
+     * Capture runs exactly 180s of actual testing after stream readiness.
+     */
+    while(!sysutil_exit_requested) {
+        unsigned long long now=milliseconds();
         unsigned long long t=elapsed();
-        int s=stage_for(t);
-        if(s!=previous_stage) {
-            char msg[128];
-            snprintf(msg,sizeof(msg),"Stage: %s",stages[s]);
-            msgDialogProgressBarSetMsg(MSG_PROGRESSBAR_INDEX0,msg);
-            emit("stage",NULL);
-            previous_stage=s;
-        }
-        if(attached_dev<0 && device_id>=0) {
+        int stage=-1;
+
+        pump_events();
+        if(!completed && attached_dev<0 && device_id>=0 && !detached) {
             attached_dev=device_id;
+            ui.receiver=1;
+            have_device_desc=have_config_desc=have_interface_desc=have_interrupt_ep=0;
+            ui.usb_ready=0; ui.init_ok=0;ui.init_sent=0;ui.init_error=0;
+            previous_length=-1;
             emit("receiver_detected",NULL);
             inspect_descriptors(attached_dev);
             ctrl_pipe=usbOpenPipe(attached_dev,NULL);
             emit_rc("open_control_pipe",ctrl_pipe);
-            if(ctrl_pipe>=0) send_keepalive();
+            if(ctrl_pipe<0)last_error("open USB control endpoint",ctrl_pipe);
+            ui.usb_ready=have_device_desc&&have_config_desc&&have_interface_desc&&
+                          have_interrupt_ep&&ctrl_pipe>=0;
+            if(ui.usb_ready)send_keepalive();
+            last_keepalive_ms=now;
         }
         if(detached) {
             pump_events();
-            emit("receiver_detached",NULL);
-            /* Stop transfers; do not close an in-flight pipe from callback. */
             if(!in_flight && !out_flight) {
-                if(int_pipe>=0) usbClosePipe(int_pipe);
-                if(ctrl_pipe>=0) usbClosePipe(ctrl_pipe);
+                if(int_pipe>=0)usbClosePipe(int_pipe);
+                if(ctrl_pipe>=0)usbClosePipe(ctrl_pipe);
                 int_pipe=-1;ctrl_pipe=-1;attached_dev=-1;detached=0;
+                test_started_ms=0;previous_length=-1;
+                ui.receiver=ui.usb_ready=ui.init_ok=ui.init_sent=0;
+                ui.stage=-1;
             }
         }
-        if(attached_dev>=0 && !detached) {
-            if(((int)(t/1000)-last_keepalive)>=7 && !out_flight) {
-                send_keepalive();last_keepalive=(int)(t/1000);
+        if(!completed && attached_dev>=0 && !detached) {
+            if(now-last_keepalive_ms>=7000 && !out_flight) {
+                send_keepalive();last_keepalive_ms=now;
             }
             listen_once();
         }
         pump_events();
+
+        if(!completed) {
+            if(ui.usb_ready && ui.init_ok && report_count>0) {
+                if(!test_started_ms) {
+                    test_started_ms=milliseconds();
+                    emit("guided_testing_started",NULL);
+                }
+            }
+            if(test_started_ms && now-test_started_ms>=180000ULL) {
+                completed=1;ui.finished=1;emit("guided_testing_finished",NULL);
+            }
+            if(!completed && test_started_ms) {
+                stage=stage_for(test_time_ms());
+                ui.stage=stage;
+                ui.testing_seconds=(int)(test_time_ms()/1000ULL);
+                snprintf(ui.reason,sizeof(ui.reason),"%s",instructions[stage]);
+                if(stage!=previous_stage){
+                    emit("stage",NULL);
+                    previous_stage=stage;
+                }
+            } else if(!completed) {
+                ui.stage=-1;
+                if(!usb_initialized)snprintf(ui.reason,sizeof(ui.reason),"USB driver initialization failed. Read error below.");
+                else if(!registered)snprintf(ui.reason,sizeof(ui.reason),"Receiver driver registration failed.");
+                else if(!ui.receiver)snprintf(ui.reason,sizeof(ui.reason),"Plug in PS4 dongle (1430:07BB). Timer paused.");
+                else if(!ui.usb_ready)snprintf(ui.reason,sizeof(ui.reason),"USB descriptors/endpoint incomplete. Timer paused.");
+                else if(!ui.init_ok)snprintf(ui.reason,sizeof(ui.reason),"Waiting for HID SET_REPORT success. Timer paused.");
+                else snprintf(ui.reason,sizeof(ui.reason),"Pair guitar, press frets: waiting for raw input reports.");
+            }
+        }
+
+        ui.dropped_events=(int)dropped;
+        ui.elapsed_seconds=(int)(t/1000ULL);
+
+        if(pad_ready && controller_start()) {
+            if(!completed) {
+                completed=1;
+                ui.finished=1;
+                emit("capture_stopped_by_start",NULL);
+            } else if(final_written) {
+                break;
+            }
+        }
+        if(completed && !final_written) {
+            pump_events();
+            emit("capture_complete",NULL);
+            summary=fopen(sum_path,"wb");
+            if(summary) {
+                fprintf(summary,"GHL PS4 dongle diagnostic v0.5-live\n");
+                fprintf(summary,"Target USB VID:PID 1430:07BB\n");
+                fprintf(summary,"Receiver detected: %d\nUSB interface ready: %d\n",ui.receiver,ui.usb_ready);
+                fprintf(summary,"HID SET_REPORT success callback observed: %d\n",ui.init_ok);
+                fprintf(summary,"USB reports: %u\nRaw report changes: %d\nUSB error events: %u\n",
+                        report_count,ui.input_changes,usb_errors);
+                fprintf(summary,"Attaches: %u Detaches: %u SET_REPORT completions: %u\n",
+                        attach_count,detach_count,control_count);
+                fprintf(summary,"Event queue dropped: %u\nLast error: %s 0x%08X\n",
+                        dropped,ui.last_operation,(unsigned)ui.last_error);
+                fprintf(summary,"Telemetry: %s\n",log_path);
+                fprintf(summary,"Raw report changes are NOT proof of successful guitar pairing.\n");
+                fclose(summary);
+            }
+            if(logfile){fflush(logfile);fclose(logfile);logfile=NULL;}
+            final_written=1;
+        }
+        if(now-last_draw_ms>=450) {
+            if(graphics_ok) {
+                ghl_ui_draw(&ui);
+            } else {
+                char a[260],b[260];
+                snprintf(a,sizeof(a),"Dongle:%s USB:%s SET_REPORT:%s  Reports:%d",
+                         ui.receiver?"YES":"WAIT",ui.usb_ready?"READY":"WAIT",
+                         ui.init_ok?"ACK":"WAIT/ERROR",ui.input_reports);
+                snprintf(b,sizeof(b),"Changes:%d Errors:%d  %s",
+                         ui.input_changes,ui.total_errors,ui.finished?"DONE - START TO EXIT":ui.reason);
+                msgDialogProgressBarSetMsg(MSG_PROGRESSBAR_INDEX0,a);
+                msgDialogProgressBarSetMsg(MSG_PROGRESSBAR_INDEX1,b);
+            }
+            last_draw_ms=now;
+        }
         sysUtilCheckCallback();
-        usleep(12000);
+        usleep(16000);
     }
-    pump_events();
-    emit("capture_complete",NULL);
-    summary=fopen(sum_path,"wb");
-    if(summary) {
-        fprintf(summary,"GHL PS4 dongle probe v0.4-fresh\n");
-        fprintf(summary,"VID:PID 1430:07bb, duration %d seconds\n",DURATION_SEC);
-        fprintf(summary,"USB reports: %u\nUSB error events: %u\n",report_count,usb_errors);
-        fprintf(summary,"Attaches: %u Detaches: %u SET_REPORT completions: %u\n",
-                attach_count,detach_count,control_count);
-        fprintf(summary,"Event queue dropped: %u\n",dropped);
-        fprintf(summary,"Telemetry: %s\n",log_path);
-        fclose(summary);
+
+    if(!final_written) {
+        emit("exit_before_complete",NULL);
+        summary=fopen(sum_path,"wb");
+        if(summary){fprintf(summary,"Interrupted by PS3 system exit. Reports: %u Errors: %u\n",
+                            report_count,usb_errors);fclose(summary);}
     }
-    msgDialogAbort();
-    if(registered) usbUnregisterExtraLdd(&ldd);
-    /* A homebrew USB driver is unregistered before leaving. */
-    if(int_pipe>=0 && !in_flight) usbClosePipe(int_pipe);
-    if(ctrl_pipe>=0 && !out_flight) usbClosePipe(ctrl_pipe);
-    if(mutex_ok) sysMutexDestroy(q_mutex);
-    usbEnd();
-    if(logfile) fclose(logfile);
+    if(graphics_ok)ghl_ui_shutdown();
+    else msgDialogAbort();
+    if(registered)usbUnregisterExtraLdd(&ldd);
+    if(int_pipe>=0 && !in_flight)usbClosePipe(int_pipe);
+    if(ctrl_pipe>=0 && !out_flight)usbClosePipe(ctrl_pipe);
+    if(usb_initialized)usbEnd();
+    if(mutex_ok)sysMutexDestroy(q_mutex);
+    if(logfile)fclose(logfile);
+    if(pad_ready)ioPadEnd();
+    sysUtilUnregisterCallback(0);
     return 0;
 }
