@@ -4,6 +4,7 @@ typedef struct {
     int game_shape_ok;
     int guitar_connected;
     int compatible_reports;
+    int keepalive_acks;
     int passed_stages;
     char verdict[80];
     int receiver;           /* Device attach callback received */
