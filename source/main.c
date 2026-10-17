@@ -252,8 +252,8 @@ static void pump_events(void) {
                 test_started_ms=0;previous_length=-1;
             }
             if(e.kind=='F') {
-                if(e.result==0)cfg_ok=1;
-                else {config_error=e.result;cfg_ok=0;last_error("SET_CONFIGURATION completion",e.result);}
+                if(e.result==0){cfg_ok=1;ui.configuration_ok=1;}
+                else {config_error=e.result;cfg_ok=0;ui.configuration_ok=0;last_error("SET_CONFIGURATION completion",e.result);}
             }
             if(e.kind=='C') {
                 control_count++;
@@ -510,7 +510,7 @@ int main(int argc,char **argv) {
             ui.receiver=1;
             have_device_desc=have_config_desc=have_interface_desc=have_interrupt_ep=0;
             ui.usb_ready=0; ui.init_ok=0;ui.init_sent=0;ui.init_error=0;
-            cfg_ok=cfg_sent=cfg_in_flight=0;config_error=0;
+            cfg_ok=cfg_sent=cfg_in_flight=0;config_error=0;ui.configuration_ok=0;
             candidate_ep=NULL;int_pipe=-1;
             previous_length=-1;
             receiver_session_reports=0;
@@ -529,7 +529,7 @@ int main(int argc,char **argv) {
                 if(int_pipe>=0)usbClosePipe(int_pipe);
                 if(ctrl_pipe>=0)usbClosePipe(ctrl_pipe);
                 int_pipe=-1;ctrl_pipe=-1;attached_dev=-1;detached=0;
-                cfg_ok=cfg_sent=cfg_in_flight=0;candidate_ep=NULL;
+                cfg_ok=cfg_sent=cfg_in_flight=0;candidate_ep=NULL;ui.configuration_ok=0;
                 test_started_ms=0;previous_length=-1;
                 ui.receiver=ui.usb_ready=ui.init_ok=ui.init_sent=0;
                 ui.stage=-1;
