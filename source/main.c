@@ -35,7 +35,7 @@ static Event events[QUEUE_SIZE];
 static unsigned q_head, q_tail, dropped;
 static sys_mutex_t q_mutex;
 static volatile int mutex_ok, device_id = -1, detached, in_flight, out_flight;
-static int ctrl_pipe = -1, int_pipe = -1, running = 1, interface_no = 0;
+static int ctrl_pipe = -1, int_pipe = -1, interface_no = 0;
 static int in_size = USB_PACKET;
 static unsigned char in_data[USB_PACKET] __attribute__((aligned(16)));
 static unsigned char out_data[16] __attribute__((aligned(16))) =
@@ -321,6 +321,7 @@ int main(int argc,char **argv) {
     int registered=0, attached_dev=-1, previous_stage=-1;
     int rc, usb_initialized=0;
     int pad_ready=0, graphics_ok=0, final_written=0;
+    int start_was_down=0;
     unsigned long long last_keepalive_ms=0, last_draw_ms=0;
     FILE *summary;
 
@@ -443,14 +444,17 @@ int main(int argc,char **argv) {
         ui.dropped_events=(int)dropped;
         ui.elapsed_seconds=(int)(t/1000ULL);
 
-        if(pad_ready && controller_start()) {
-            if(!completed) {
-                completed=1;
-                ui.finished=1;
-                emit("capture_stopped_by_start",NULL);
-            } else if(final_written) {
-                break;
+        {
+            int start_down=pad_ready && controller_start();
+            /* Require an explicit new press to dismiss the summary. */
+            if(start_down && !start_was_down) {
+                if(!completed) {
+                    completed=1;
+                    ui.finished=1;
+                    emit("capture_stopped_by_start",NULL);
+                } else if(final_written) break;
             }
+            start_was_down=start_down;
         }
         if(completed && !final_written) {
             pump_events();
