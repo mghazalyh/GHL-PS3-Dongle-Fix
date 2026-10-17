@@ -1,8 +1,10 @@
-# GHL PS4 receiver — standalone PS3 EBOOT preflight (v0.7.1)
+# GHL PS4 receiver — standalone PS3 EBOOT preflight (v0.7.2)
 
-**Recommended latest release:** [Download preflight v0.7.1 PS3 PKG from GitHub Actions](https://github.com/mghazalyh/GHL-PS3-Dongle-Fix/actions/runs/39040091882/artifacts/12103457231).
+**Recommended latest release:** [Download preflight v0.7.2 PS3 PKG from GitHub Actions](https://github.com/mghazalyh/GHL-PS3-Dongle-Fix/actions/runs/39040653450/artifacts/12103892260).
 
 Install `ghl_ps4_probe.pkg` on PS3 Evilnat 4.92 CFW using XMB Package Manager. **You do NOT have to replace your game's EBOOT** to run this. The app checks USB receiver 1430:07BB, interface shape the real GHL EBOOT expects, SET_CONFIGURATION, interrupt IN+OUT pipes, two PS4 SET_REPORT keepalive acknowledgments, live receiver `isConnected` indication, and twelve guided guitar-action stages. It saves a conservative preflight verdict on screen and in `summary.txt`, with raw `telemetry.jsonl` available from `http://<your-ps3-ip>:8895/` while the app is running (trusted local network only).
+
+**Black-screen safeguards:** v0.7.2 displays a first startup frame **before** network/USB initialization, then updates an animated `APP ALIVE` indicator. If custom graphics fail, the app attempts a PS3-native system dialog. To **skip custom graphics entirely**, hold **L1+R1** on a normal PS3 controller while launching the app; an on-screen safe-mode system dialog reports USB status. No screenshot/hardware proof yet.
 
 **Passing this app is evidence that a controlled patched-EBOOT trial may be worthwhile, NOT proof of in-game compatibility.** A failed standalone USB claim is not definitive proof that the game's own process cannot claim the device.
 
