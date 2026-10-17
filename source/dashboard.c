@@ -111,7 +111,7 @@ void ghl_ui_draw(const GhlDashboardState *s) {
     for(i=0;i<n;i++)pixels[i]=DARK;
 
     rect(0,0,1280,9,BLUE);
-    text_at(75,35,WHITE,"GHL PS4 DONGLE PREFLIGHT  v0.7");
+    text_at(75,35,WHITE,"GHL PS4 DONGLE PREFLIGHT  v0.7.1");
     text_at(75,67,s->finished?(strncmp(s->verdict,"PREFLIGHT PASS",14)==0?GREEN:RED):YELLOW,
             s->verdict[0]?s->verdict:"WAIT: INITIALIZING USB");
 
