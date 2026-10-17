@@ -18,3 +18,10 @@ Fault classification:
 - Input reports correlate with frets: collect mappings and inspect PS3 GHL BLUS31556/BLES02180 EBOOT imports. Game patch/SPRX path remains unproven.
 
 Send back: PS3 model/CFW, screenshot of full live dashboard, precise error code, raw telemetry JSONL, summary TXT, dongle LED behavior and whether button movements correlate with report changes.
+
+
+## Browser instead of FTP
+
+In the **new v0.6** package, open `http://<IP_SHOWN_ON_PS3>:8895/` on another device on the same trusted LAN **while the PS3 diagnostic is running**. Use the two links there to download raw and summary logs. The webserver is read-only and serves no other files. LAN-only; no TLS/authentication, do not port-forward.
+
+Observe separate USB configuration callback status before the output report status. The report counter starts only on nonempty interrupt reads. The stage byte-change summary attempts to correlate user actions with raw bytes, never asserts pairing.
