@@ -1,4 +1,4 @@
-name: Build PS3 GHL v0.7 EBOOT preflight PKG
+name: Build PS3 GHL v0.7.1 EBOOT preflight PKG
 on:
   push:
     branches: [main]
@@ -48,11 +48,11 @@ jobs:
           pkg --list ghl_ps4_probe.pkg | tee package-structure.txt
           grep -q 'USRDIR/EBOOT.BIN' package-structure.txt
           grep -q 'PARAM.SFO' package-structure.txt
-          printf 'GHL PS4 receiver v0.7-preflight\nGit commit: %s\nUSB dongle target 1430:07BB\nNot hardware-tested\n' "$GITHUB_SHA" > BUILD_INFO.txt
+          printf 'GHL PS4 receiver v0.7.1-preflight\nGit commit: %s\nUSB dongle target 1430:07BB\nNot hardware-tested\n' "$GITHUB_SHA" > BUILD_INFO.txt
           sha256sum ghl_ps4_probe.pkg > SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: GHL-PS3-EBOOT-Preflight-v0.7-PKG
+          name: GHL-PS3-EBOOT-Preflight-v0.7.1-PKG
           path: |
             ghl_ps4_probe.pkg
             SHA256SUMS.txt
