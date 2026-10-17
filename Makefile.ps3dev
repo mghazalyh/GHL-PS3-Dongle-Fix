@@ -1,0 +1,25 @@
+.SUFFIXES:
+ifndef PS3DEV
+$(error PS3DEV environment variable must point at installed SDK)
+endif
+PSL1GHT ?= $(PS3DEV)
+include $(PSL1GHT)/ppu_rules
+
+TITLE := GHL PS4 USB Diagnostic
+APPID := GHLPR0001
+CONTENTID := UP0001-GHLPR0001_00-PS4USBPROBE00001
+TARGET := ghl_ps4_probe
+OFILES := main.o
+CFLAGS += -std=gnu11 -O2 -Wall -Wextra $(MACHDEP) $(LIBPSL1GHT_INC)
+LDFLAGS += $(MACHDEP)
+LIBS := -lusb -lsysmodule -lsysutil -lrt -llv2 -lm
+LIBPATHS := $(LIBPSL1GHT_LIB)
+
+.PHONY: all clean
+all: $(TARGET).pkg
+main.o: source/main.c
+	$(CC) $(CFLAGS) -c $< -o $@
+$(TARGET).elf: $(OFILES)
+	$(CC) $(OFILES) $(LDFLAGS) $(LIBPATHS) $(LIBS) -o $@
+clean:
+	rm -rf main.o $(TARGET).elf $(TARGET).self $(TARGET).fake.self $(TARGET).pkg $(TARGET).gnpdrm.pkg build
