@@ -111,7 +111,14 @@ void ghl_ui_draw(const GhlDashboardState *s) {
     for(i=0;i<n;i++)pixels[i]=DARK;
 
     rect(0,0,1280,9,BLUE);
-    text_at(75,35,WHITE,"GHL PS4 DONGLE PREFLIGHT  v0.7.1");
+    text_at(75,35,WHITE,"GHL PS4 DONGLE PREFLIGHT  v0.7.2");
+    /* Visible heartbeat even with NO DONGLE and no arriving USB data. */
+    {
+        int pulse=(s->elapsed_seconds % 2)==0;
+        rect(1162,32,24,24,pulse?GREEN:BLUE);
+        snprintf(line,sizeof(line),"APP ALIVE %04ds",s->elapsed_seconds);
+        text_at(950,67,MUTED,line);
+    }
     text_at(75,67,s->finished?(strncmp(s->verdict,"PREFLIGHT PASS",14)==0?GREEN:RED):YELLOW,
             s->verdict[0]?s->verdict:"WAIT: INITIALIZING USB");
 
@@ -155,9 +162,13 @@ void ghl_ui_draw(const GhlDashboardState *s) {
         text_at(81,514,WHITE,line);
         text_at(81,541,MUTED,"Release START, then press START again to exit.");
     } else if(s->stage<0) {
-        text_at(81,475,YELLOW,"WAITING: TEST TIMER IS PAUSED");
+        text_at(81,475,YELLOW,
+                s->startup_phase<3?"APP STARTING - DISPLAY ONLINE":
+                "WAITING: TEST TIMER IS PAUSED");
         text_at(81,508,WHITE,s->reason);
-        text_at(81,541,MUTED,"Do not interpret dongle detection as guitar pairing.");
+        text_at(81,541,MUTED,s->startup_phase<3 ?
+                "Display is working. Initializing USB; no game files changed.":
+                "Dashboard is alive even if USB receiver is not detected.");
     } else {
         text_at(81,475,GREEN,"CURRENT TEST");
         text_at(81,508,WHITE,s->reason);
