@@ -121,6 +121,17 @@ static void sysutil_callback(u64 status,u64 param,void *user) {
     (void)param;(void)user;
     if(status==SYSUTIL_EXIT_GAME) sysutil_exit_requested=1;
 }
+/* Escape hatch for incompatible RSX setups: hold L1+R1 on a normal
+ * PS3 pad during startup to skip RSX entirely and use SysUtil dialogs. */
+static int controller_force_safe_display(void) {
+    padInfo info;padData data;int i;
+    if(ioPadGetInfo(&info)!=PAD_OK)return 0;
+    for(i=0;i<7;i++) if(info.status[i]) {
+        if(ioPadGetData(i,&data)==PAD_OK && data.BTN_L1 && data.BTN_R1)
+            return 1;
+    }
+    return 0;
+}
 static int controller_start(void) {
     padInfo info;padData data;int i;
     if(ioPadGetInfo(&info)!=PAD_OK) return 0;
@@ -464,6 +475,7 @@ int main(int argc,char **argv) {
     int registered=0, attached_dev=-1, previous_stage=-1;
     int rc, usb_initialized=0;
     int pad_ready=0, graphics_ok=0, final_written=0;
+    int force_dialog_mode=0;
     int start_was_down=0;
     unsigned long long last_keepalive_ms=0, last_draw_ms=0;
     FILE *summary;
@@ -475,7 +487,7 @@ int main(int argc,char **argv) {
     ui.stage=-1;
     prepare_log();
     snprintf(ui.log_path,sizeof(ui.log_path),"%s",log_path);
-    emit("start",",\"version\":\"v0.7.1-preflight\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
+    emit("start",",\"version\":\"v0.7.2-preflight\",\"target_vid\":\"1430\",\"target_pid\":\"07bb\"");
     sysMutexAttrInitialize(mattr);
     rc=sysMutexCreate(&q_mutex,&mattr);
     mutex_ok=(rc==0);
@@ -487,14 +499,35 @@ int main(int argc,char **argv) {
     sysUtilRegisterCallback(0,sysutil_callback,NULL);
     pad_ready=(ioPadInit(7)==PAD_OK);
     emit("pad_init",pad_ready?",\"available\":true":",\"available\":false");
-    graphics_ok=ghl_ui_init();
+    if(pad_ready) {
+        int i;
+        /* Some controllers appear several frames after ioPadInit(). */
+        for(i=0;i<8;i++){
+            if(controller_force_safe_display()){force_dialog_mode=1;break;}
+            usleep(70000);
+            sysUtilCheckCallback();
+        }
+    }
+    ui.safe_dialog_mode=force_dialog_mode;
+    snprintf(ui.reason,sizeof(ui.reason),"DISPLAY READY - preparing USB startup...");
+    ui.startup_phase=1;
+    graphics_ok=force_dialog_mode?0:ghl_ui_init();
     emit("graphics_init",graphics_ok?",\"available\":true":",\"available\":false");
-    if(!graphics_ok) {
-        /* Visible emergency fallback if RSX display allocation fails. */
+    if(graphics_ok) {
+        /* FIRST FRAME: draw synchronously BEFORE USB init/network/driver
+         * registration, otherwise a blocked USB API can appear black. */
+        ghl_ui_draw(&ui);
+        emit("first_display_frame",",\"ok\":true");
+    } else {
+        /* A real native system dialog, not a headless printf-only fallback.
+         * L1+R1 allows choosing it proactively on a PS3 RSX-incompatible setup. */
         msgDialogOpen2((msgType)(MSG_DIALOG_NORMAL|MSG_DIALOG_DOUBLE_PROGRESSBAR),
-            "GHL v0.5 LIVE: RSX unavailable. USB/live counters shown below.",
+            force_dialog_mode?
+                "GHL PREFLIGHT v0.7.2 SAFE DISPLAY. RSX bypassed. Checking USB...":
+                "GHL PREFLIGHT v0.7.2: RSX failed. Safe USB test mode active.",
             NULL,NULL,NULL);
-        last_error("RSX initialization unavailable",-1);
+        emit("fallback_system_dialog",force_dialog_mode?
+            ",\"reason\":\"user_L1_R1\"":",\"reason\":\"rsx_failed\"");
     }
 
     /* Read-only HTTP export runs independently from USB/UI. LAN only. */
@@ -502,6 +535,9 @@ int main(int argc,char **argv) {
     http_active=(rc==0);
     ui.network_ready=http_active;
     if(http_active)emit("lan_export_started",",\"port\":8895");
+    ui.startup_phase=2;
+    snprintf(ui.reason,sizeof(ui.reason),"DISPLAY LIVE - network initialized; loading USB...");
+    if(graphics_ok)ghl_ui_draw(&ui);
     else {
         emit_rc("lan_export_failed",rc);
         /* Network is OPTIONAL; do not mark USB functionality as failing. */
@@ -541,6 +577,11 @@ int main(int argc,char **argv) {
         registered=(rc==USB_OK);
         if(!registered)last_error("extra LDD register",rc);
     }
+    ui.startup_phase=3;
+    snprintf(ui.reason,sizeof(ui.reason),
+        registered?"PRECHECK ONLINE - plug in PS4 dongle and pair guitar.":
+                   "USB driver registration failed; see code or logs.");
+    if(graphics_ok)ghl_ui_draw(&ui);
     /* Work forever while waiting for USB, but allow START to finish.
      * Capture runs exactly 180s of actual testing after stream readiness.
      */
@@ -704,7 +745,7 @@ int main(int argc,char **argv) {
                  (unsigned)ui.total_errors,1));
             summary=fopen(sum_path,"wb");
             if(summary) {
-                fprintf(summary,"GHL PS4 dongle preflight v0.7.1 (not an in-game compatibility proof)\n");
+                fprintf(summary,"GHL PS4 dongle preflight v0.7.2 (not an in-game compatibility proof)\n");
                 fprintf(summary,"PREFLIGHT VERDICT: %s\n",ui.verdict);
                 fprintf(summary,"The verdict covers standalone USB access only; NOT EBOOT booting, game USB ownership or injected game hooks.\n");
                 fprintf(summary,"Game HID interface shape (from independently analyzed EBOOT): %d\n",gh_game_shape);
